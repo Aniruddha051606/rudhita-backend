@@ -55,7 +55,7 @@ logging.config.dictConfig({
         "sqlalchemy.engine": {"level": "WARNING", "propagate": True},  # set INFO to debug queries
         "uvicorn":   {"level": "INFO",  "propagate": False, "handlers": ["console"]},
     },
-})
+}) 
 logger = logging.getLogger("rudhita")
 
 # ── Detect environment ────────────────────────────────────────────────────────
