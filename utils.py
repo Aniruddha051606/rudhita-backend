@@ -1,0 +1,193 @@
+"""
+utils.py  —  Auth Utilities (PATCHED)
+
+Changes from audit:
+  - hash_otp()            : OTPs now stored as HMAC-SHA256, never plain text
+  - send_otp_email()      : Real SMTP transport; print() only in dev mode
+  - create_access_token() : Includes 'jti' claim so tokens can be revoked
+  - create_refresh_token(): Opaque random token stored in DB
+  - get_current_user()    : Checks TokenBlocklist before trusting a token
+"""
+
+import os
+import hmac
+import uuid
+import secrets
+import hashlib
+import smtplib
+import logging
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from jwt.exceptions import InvalidTokenError
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+from database import get_db
+
+logger = logging.getLogger("rudhita")
+
+# ── Secrets & config ─────────────────────────────────────────────────────────
+SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+if not SECRET_KEY:
+    raise ValueError("JWT_SECRET_KEY is not set. Add it to your .env file.")
+
+ALGORITHM                  = os.getenv("JWT_ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+REFRESH_TOKEN_EXPIRE_DAYS   = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "30"))
+
+# ── Password hashing ─────────────────────────────────────────────────────────
+from passlib.context import CryptContext
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return pwd_context.verify(plain, hashed)
+
+
+# ── OTP helpers ───────────────────────────────────────────────────────────────
+def hash_otp(otp: str) -> str:
+    """
+    Returns an HMAC-SHA256 hex digest of the OTP.
+    Stored in the DB instead of plain text so a DB leak doesn't expose codes.
+    """
+    return hmac.new(
+        SECRET_KEY.encode("utf-8"),
+        otp.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def verify_otp_hash(plain_otp: str, stored_hash: str) -> bool:
+    """Constant-time comparison to prevent timing attacks."""
+    return hmac.compare_digest(hash_otp(plain_otp), stored_hash)
+
+
+# ── Email ─────────────────────────────────────────────────────────────────────
+def send_otp_email(to_email: str, otp_code: str) -> None:
+    """
+    Sends the OTP via SMTP.
+    Requires in .env:
+        SMTP_HOST, SMTP_PORT (default 587), SMTP_USER, SMTP_PASS, FROM_EMAIL
+
+    In development (SMTP_HOST not set), falls back to a WARNING log line only.
+    Never prints the OTP to stdout in production.
+    """
+    smtp_host = os.getenv("SMTP_HOST")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_pass = os.getenv("SMTP_PASS")
+    from_email = os.getenv("FROM_EMAIL", smtp_user)
+
+    if not smtp_host or not smtp_user:
+        # Development only — never reaches this branch in production
+        logger.warning("[DEV] OTP for %s => %s  (set SMTP_HOST to send real emails)", to_email, otp_code)
+        return
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "Your Rudhita Verification Code"
+    msg["From"]    = from_email
+    msg["To"]      = to_email
+
+    text = (
+        f"Your Rudhita verification code is: {otp_code}\n"
+        f"It expires in 10 minutes.\n"
+        f"If you did not request this, please ignore this email."
+    )
+    html = f"""
+    <html><body style="font-family:sans-serif;max-width:480px;margin:auto">
+      <h2 style="color:#1a1a1a">Your Rudhita OTP</h2>
+      <p style="font-size:32px;letter-spacing:6px;font-weight:bold;color:#333">{otp_code}</p>
+      <p style="color:#555">This code expires in <strong>10 minutes</strong>.</p>
+      <p style="color:#999;font-size:12px">If you didn't request this, ignore this email.</p>
+    </body></html>
+    """
+    msg.attach(MIMEText(text, "plain"))
+    msg.attach(MIMEText(html, "html"))
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(smtp_user, smtp_pass)
+            server.sendmail(from_email, [to_email], msg.as_string())
+        logger.info("OTP email dispatched to %s", to_email)
+    except smtplib.SMTPException as exc:
+        logger.error("SMTP error sending to %s: %s", to_email, exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Email service temporarily unavailable. Please try again shortly.",
+        )
+
+
+# ── JWT access token ──────────────────────────────────────────────────────────
+def create_access_token(data: dict) -> str:
+    """
+    Generates a signed JWT.
+    Includes 'jti' (JWT ID) so individual tokens can be blocklisted on logout.
+    """
+    to_encode = data.copy()
+    expire    = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    jti       = str(uuid.uuid4())
+    to_encode.update({"exp": expire, "jti": jti})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+# ── Refresh token ─────────────────────────────────────────────────────────────
+def create_refresh_token() -> tuple[str, datetime]:
+    """
+    Returns (opaque_token_string, expiry_datetime).
+    The caller must persist the token in the RefreshToken table.
+    """
+    token      = secrets.token_urlsafe(48)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    return token, expires_at
+
+
+# ── Auth dependency ───────────────────────────────────────────────────────────
+def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
+    """
+    FastAPI dependency — decodes the JWT, checks the blocklist,
+    and returns the authenticated User object.
+    """
+    import models  # local import to avoid circular dependency
+
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    try:
+        payload  = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str  = payload.get("sub")
+        user_id: int = payload.get("id")
+        jti: str    = payload.get("jti")
+        if not email or not user_id or not jti:
+            raise credentials_exception
+    except InvalidTokenError:
+        raise credentials_exception
+
+    # FIX: check if this specific token was revoked (logout)
+    blocked = db.query(models.TokenBlocklist).filter(
+        models.TokenBlocklist.jti == jti
+    ).first()
+    if blocked:
+        raise credentials_exception
+
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if user is None or not user.is_verified:
+        raise credentials_exception
+
+    return user
