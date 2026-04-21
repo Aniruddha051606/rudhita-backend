@@ -31,21 +31,6 @@ limiter = Limiter(key_func=get_remote_address)
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-def _generate_otp(db: Session, email: str) -> str:
-    """
-    Deletes any existing OTP for this email, creates a new one,
-    and stores its HMAC hash (not the plain code).
-    Returns the plain code so the caller can email it.
-    """
-    db.query(models.OTP).filter(models.OTP.email == email).delete()
-    otp_plain  = str(secrets.randbelow(900_000) + 100_000)  # 100000–999999
-    otp_hashed = utils.hash_otp(otp_plain)
-    expiry     = datetime.now(timezone.utc).replace(tzinfo=None) + __import__("datetime").timedelta(minutes=10)
-    # store the hash; plain OTP only travels via email, never in the DB
-    db.add(models.OTP(email=email, otp_code=otp_hashed, expires_at=expiry))
-    db.commit()
-    return otp_plain
-
 
 from datetime import timedelta
 
