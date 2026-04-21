@@ -1,0 +1,22 @@
+name: Remote Deployment
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: self-hosted  # This tells GitHub to use your Dell Optiplex!
+    steps:
+      - name: Pull latest code
+        uses: actions/checkout@v3
+
+      - name: Setup Virtual Environment & Install Dependencies
+        run: |
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install -r requirements.txt
+
+      - name: Restart Backend Service
+        run: |
+          sudo systemctl restart rudhita-backend
