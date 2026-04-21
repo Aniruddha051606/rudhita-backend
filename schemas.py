@@ -125,7 +125,7 @@ class ProductBase(BaseModel):
     @field_validator("original_price")
     @classmethod
     def original_must_exceed_price(cls, v, info):
-        if v is not None and "price" in info.data and v <= info.data["price"]:
+        if v is not None and "price" in info.data and v < info.data["price"]:
             raise ValueError("original_price must be greater than price to show a discount")
         return v
 
