@@ -1,18 +1,19 @@
 """
-admin.py  —  Admin / Seller Dashboard (PATCHED)
+admin.py  â€”  Admin / Seller Dashboard (PATCHED)
 
 Changes from audit:
   - _audit() helper: logs every admin write to the audit_logs table
   - make_admin():         audit logged
   - admin_update_order(): audit logged
   - set_waybill():        audit logged
-  - admin_list_users():   limit capped at 200 (was uncapped — ?limit=999999 would dump the table)
+  - admin_list_users():   limit capped at 200 (was uncapped â€” ?limit=999999 would dump the table)
   - admin_list_products(): limit capped at 200
 """
 
 import json
 import uuid
 import logging
+from decimal import Decimal
 
 from fastapi         import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm  import Session, joinedload
@@ -28,7 +29,7 @@ logger = logging.getLogger("rudhita")
 router = APIRouter(prefix="/admin", tags=["Admin / Seller Dashboard"])
 
 
-# ── Auth dependency ───────────────────────────────────────────────────────────
+# â”€â”€ Auth dependency â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def require_admin(current_user: models.User = Depends(get_current_user)):
     if not current_user.is_admin:
@@ -36,7 +37,7 @@ def require_admin(current_user: models.User = Depends(get_current_user)):
     return current_user
 
 
-# ── Audit helper ──────────────────────────────────────────────────────────────
+# â”€â”€ Audit helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _audit(
     db:          Session,
@@ -46,7 +47,7 @@ def _audit(
     target_id:   int = None,
     detail:      dict = None,
 ):
-    """Persist every admin write to audit_logs. Never raises — failures are logged only."""
+    """Persist every admin write to audit_logs. Never raises â€” failures are logged only."""
     try:
         db.add(models.AuditLog(
             actor_id    = actor.id,
@@ -60,7 +61,7 @@ def _audit(
         logger.error("Failed to write audit log: %s", exc)
 
 
-# ── 1. Dashboard ──────────────────────────────────────────────────────────────
+# â”€â”€ 1. Dashboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/dashboard")
 def get_dashboard(
@@ -82,14 +83,15 @@ def get_dashboard(
     )
     return {
         "totalOrders":   total_orders,
-        "totalRevenue":  float(total_revenue),
+        # BUG 14 FIX: keep as Decimal — float() re-introduces floating-point precision issues
+        "totalRevenue":  total_revenue if isinstance(total_revenue, Decimal) else Decimal(str(total_revenue or 0)),
         "totalProducts": total_products,
         "recentOrders":  [
             {
                 "id":            o.id,
                 "customer_name": o.owner.name if o.owner else "N/A",
                 "total":         float(o.total_amount),
-                "status":        o.shipping_status.lower(),
+                "shipping_status": o.shipping_status.lower() if o.shipping_status else "pending",
                 "created_at":    o.created_at.isoformat(),
             }
             for o in recent_orders
@@ -97,7 +99,7 @@ def get_dashboard(
     }
 
 
-# ── 2. Stats ──────────────────────────────────────────────────────────────────
+# â”€â”€ 2. Stats â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/stats", response_model=schemas.DashboardStats)
 def get_stats(db: Session = Depends(get_db), _: models.User = Depends(require_admin)):
@@ -106,14 +108,15 @@ def get_stats(db: Session = Depends(get_db), _: models.User = Depends(require_ad
         pending_orders    = db.query(sqlfunc.count(models.Order.id)).filter(models.Order.shipping_status == "Pending").scalar(),
         shipped_orders    = db.query(sqlfunc.count(models.Order.id)).filter(models.Order.shipping_status == "Shipped").scalar(),
         delivered_orders  = db.query(sqlfunc.count(models.Order.id)).filter(models.Order.shipping_status == "Delivered").scalar(),
-        total_revenue     = float(db.query(sqlfunc.coalesce(sqlfunc.sum(models.Order.total_amount), 0.0)).filter(models.Order.payment_status == "Paid").scalar()),
+        # BUG 14 FIX: removed float() — keeps Decimal precision from Numeric DB column
+        total_revenue     = db.query(sqlfunc.coalesce(sqlfunc.sum(models.Order.total_amount), 0.0)).filter(models.Order.payment_status == "Paid").scalar() or Decimal("0.00"),
         total_products    = db.query(sqlfunc.count(models.Product.id)).filter(models.Product.is_active == True).scalar(),
         low_stock_products = db.query(sqlfunc.count(models.Product.id)).filter(models.Product.stock_quantity < 10, models.Product.is_active == True).scalar(),
         total_users       = db.query(sqlfunc.count(models.User.id)).filter(models.User.is_verified == True).scalar(),
     )
 
 
-# ── 3. Products ───────────────────────────────────────────────────────────────
+# â”€â”€ 3. Products â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/products")
 def admin_list_products(
@@ -205,7 +208,7 @@ def admin_delete_product(
     return {"status": "success", "message": f"Product '{product.name}' deactivated."}
 
 
-# ── 4. Orders ─────────────────────────────────────────────────────────────────
+# â”€â”€ 4. Orders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/orders")
 def admin_list_orders(
@@ -293,7 +296,7 @@ def set_waybill(
     return {"status": "success", "waybill": waybill}
 
 
-# ── 5. Users ──────────────────────────────────────────────────────────────────
+# â”€â”€ 5. Users â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/users")
 def admin_list_users(
@@ -339,7 +342,7 @@ def make_admin(
     return {"status": "success", "message": f"{user.name} is now an admin."}
 
 
-# ── 6. Low-stock alerts ───────────────────────────────────────────────────────
+# â”€â”€ 6. Low-stock alerts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/alerts/low-stock", response_model=List[schemas.ProductStockAlert])
 def low_stock_alerts(
@@ -355,7 +358,7 @@ def low_stock_alerts(
     )
 
 
-# ── 7. Audit log ─────────────────────────────────────────────────────────────
+# â”€â”€ 7. Audit log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/audit-log")
 def get_audit_log(

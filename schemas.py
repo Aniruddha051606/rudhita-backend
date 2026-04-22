@@ -1,5 +1,5 @@
 """
-schemas.py  —  Pydantic Schemas (PATCHED)
+schemas.py  â€”  Pydantic Schemas (PATCHED)
 
 Changes from audit:
   - UserCreate:     password min 8 chars, name min 2 chars (schema-level, not just route)
@@ -15,9 +15,9 @@ from typing import Optional, List
 from datetime import datetime
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # AUTH
-# ═══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class UserCreate(BaseModel):
     name:     str      = Field(min_length=2, max_length=100)
@@ -53,9 +53,11 @@ class UserResponse(BaseModel):
 
 
 class UserProfileUpdate(BaseModel):
-    name:     Optional[str] = Field(default=None, min_length=2, max_length=100)
-    phone:    Optional[str] = Field(default=None, max_length=20)
-    password: Optional[str] = Field(default=None, min_length=8, max_length=128)
+    name:             Optional[str] = Field(default=None, min_length=2, max_length=100)
+    phone:            Optional[str] = Field(default=None, max_length=20)
+    password:         Optional[str] = Field(default=None, min_length=8, max_length=128)
+    # BUG 31 FIX: current_password required when changing password
+    current_password: Optional[str] = Field(default=None, max_length=128)
 
 
 class Token(BaseModel):
@@ -68,9 +70,9 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # ADDRESS
-# ═══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class AddressCreate(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -107,9 +109,9 @@ class AddressResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # PRODUCT
-# ═══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class ProductBase(BaseModel):
     sku:            str
@@ -125,7 +127,9 @@ class ProductBase(BaseModel):
     @field_validator("original_price")
     @classmethod
     def original_must_exceed_price(cls, v, info):
-        if v is not None and "price" in info.data and v < info.data["price"]:
+        # BUG 29 FIX: use .get() — if price failed its own validation it won't be in info.data
+        price = info.data.get("price")
+        if v is not None and price is not None and v < price:
             raise ValueError("original_price must be greater than price to show a discount")
         return v
 
@@ -135,7 +139,7 @@ class ProductCreate(ProductBase):
 
 
 class ProductAdminCreate(BaseModel):
-    """Used by the admin form — SKU is auto-generated if not supplied."""
+    """Used by the admin form â€” SKU is auto-generated if not supplied."""
     name:           str            = Field(min_length=2, max_length=200)
     description:    Optional[str] = None
     category:       str
@@ -175,9 +179,9 @@ class ProductListResponse(BaseModel):
     limit:    Optional[int] = None
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # CART
-# ═══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class CartItemAdd(BaseModel):
     product_id: int
@@ -204,9 +208,9 @@ class CartResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # ORDERS
-# ═══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class OrderCreate(BaseModel):
     shipping_address: str
@@ -225,11 +229,11 @@ class FrontendOrderCreate(BaseModel):
     address:        CheckoutAddress
     shipping_method: str = "standard"
     payment_method:  str = "razorpay"
-    # NOTE: 'total' from frontend is intentionally ignored — backend recalculates from DB
+    # NOTE: 'total' from frontend is intentionally ignored â€” backend recalculates from DB
     total: Optional[Decimal] = None
 
 
-# ── FIX: New schema for payment confirmation that requires all 3 Razorpay fields ──
+# â”€â”€ FIX: New schema for payment confirmation that requires all 3 Razorpay fields â”€â”€
 class PaymentConfirm(BaseModel):
     """
     All three fields are required for Razorpay HMAC-SHA256 signature verification.
@@ -241,7 +245,7 @@ class PaymentConfirm(BaseModel):
 
 
 class PaymentStatusUpdate(BaseModel):
-    """Legacy — kept only for the shipping address admin patch."""
+    """Legacy â€” kept only for the shipping address admin patch."""
     payment_status:      str
     razorpay_payment_id: Optional[str] = None
     delhivery_waybill:   Optional[str] = None
@@ -301,9 +305,9 @@ class TrackingResponse(BaseModel):
     events:         List[TrackingEventResponse] = []
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # ADMIN / SELLER DASHBOARD
-# ═══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class OrderStatusUpdate(BaseModel):
     shipping_status: str

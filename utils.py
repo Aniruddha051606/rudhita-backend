@@ -1,5 +1,5 @@
 """
-utils.py  —  Auth Utilities (PATCHED)
+utils.py  â€”  Auth Utilities (PATCHED)
 
 Changes from audit:
   - hash_otp()            : OTPs now stored as HMAC-SHA256, never plain text
@@ -29,7 +29,7 @@ from database import get_db
 
 logger = logging.getLogger("rudhita")
 
-# ── Secrets & config ─────────────────────────────────────────────────────────
+# â”€â”€ Secrets & config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 if not SECRET_KEY:
     raise ValueError("JWT_SECRET_KEY is not set. Add it to your .env file.")
@@ -38,7 +38,7 @@ ALGORITHM                  = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 REFRESH_TOKEN_EXPIRE_DAYS   = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "30"))
 
-# ── Password hashing ─────────────────────────────────────────────────────────
+# â”€â”€ Password hashing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 from passlib.context import CryptContext
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -53,16 +53,17 @@ def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
 
 
-# ── OTP helpers ───────────────────────────────────────────────────────────────
+# â”€â”€ OTP helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def hash_otp(otp: str) -> str:
     """
     Returns an HMAC-SHA256 hex digest of the OTP.
     Stored in the DB instead of plain text so a DB leak doesn't expose codes.
     """
+    # BUG 8 FIX: use digestmod= keyword arg — positional is deprecated and fails in some envs
     return hmac.new(
         SECRET_KEY.encode("utf-8"),
         otp.encode("utf-8"),
-        hashlib.sha256,
+        digestmod=hashlib.sha256,
     ).hexdigest()
 
 
@@ -71,7 +72,7 @@ def verify_otp_hash(plain_otp: str, stored_hash: str) -> bool:
     return hmac.compare_digest(hash_otp(plain_otp), stored_hash)
 
 
-# ── Email ─────────────────────────────────────────────────────────────────────
+# â”€â”€ Email â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def send_otp_email(to_email: str, otp_code: str) -> None:
     """
     Sends the OTP via SMTP.
@@ -88,7 +89,7 @@ def send_otp_email(to_email: str, otp_code: str) -> None:
     from_email = os.getenv("FROM_EMAIL", smtp_user)
 
     if not smtp_host or not smtp_user:
-        # Development only — never reaches this branch in production
+        # Development only â€” never reaches this branch in production
         logger.warning("[DEV] OTP for %s => %s  (set SMTP_HOST to send real emails)", to_email, otp_code)
         return
 
@@ -128,7 +129,7 @@ def send_otp_email(to_email: str, otp_code: str) -> None:
         )
 
 
-# ── JWT access token ──────────────────────────────────────────────────────────
+# â”€â”€ JWT access token â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def create_access_token(data: dict) -> str:
     """
     Generates a signed JWT.
@@ -141,7 +142,7 @@ def create_access_token(data: dict) -> str:
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-# ── Refresh token ─────────────────────────────────────────────────────────────
+# â”€â”€ Refresh token â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def create_refresh_token() -> tuple[str, datetime]:
     """
     Returns (opaque_token_string, expiry_datetime).
@@ -152,13 +153,13 @@ def create_refresh_token() -> tuple[str, datetime]:
     return token, expires_at
 
 
-# ── Auth dependency ───────────────────────────────────────────────────────────
+# â”€â”€ Auth dependency â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ):
     """
-    FastAPI dependency — decodes the JWT, checks the blocklist,
+    FastAPI dependency â€” decodes the JWT, checks the blocklist,
     and returns the authenticated User object.
     """
     import models  # local import to avoid circular dependency

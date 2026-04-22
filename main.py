@@ -147,5 +147,3 @@ def pool_stats(_: models.User = Depends(require_admin)):
         "checked_out": pool.checkedout(),
         "overflow":    pool.overflow(),
     }
-
-

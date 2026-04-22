@@ -1,12 +1,12 @@
 """
-orders.py  —  Order Routes (PATCHED)
+orders.py  â€”  Order Routes (PATCHED)
 
 Changes from audit:
-  1. create_order_from_frontend(): SELECT FOR UPDATE on product rows — prevents overselling
-  2. confirm_payment():            Razorpay HMAC-SHA256 signature verification — REQUIRED
-  3. confirm_payment():            Idempotency guard — cannot overwrite a "Paid" order
-  4. list_my_orders():             Single subquery for item counts — fixes N+1
-  5. _clear_cart():               Opens its own DB session — fixes stale-session crash
+  1. create_order_from_frontend(): SELECT FOR UPDATE on product rows â€” prevents overselling
+  2. confirm_payment():            Razorpay HMAC-SHA256 signature verification â€” REQUIRED
+  3. confirm_payment():            Idempotency guard â€” cannot overwrite a "Paid" order
+  4. list_my_orders():             Single subquery for item counts â€” fixes N+1
+  5. _clear_cart():               Opens its own DB session â€” fixes stale-session crash
 """
 
 import os
@@ -29,7 +29,7 @@ logger = logging.getLogger("rudhita")
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _get_razorpay() -> razorpay.Client:
     key_id     = os.getenv("RAZORPAY_KEY_ID")
@@ -43,7 +43,7 @@ def _format_address(addr: schemas.CheckoutAddress) -> str:
     return f"{addr.name}, {addr.phone}, {addr.street}, {addr.city}, {addr.state} - {addr.pincode}"
 
 
-# FIX: background task creates its own session — the request session is closed by now
+# FIX: background task creates its own session â€” the request session is closed by now
 def _clear_cart(user_id: int) -> None:
     db = SessionLocal()
     try:
@@ -58,7 +58,7 @@ def _clear_cart(user_id: int) -> None:
         db.close()
 
 
-# ── 1. Create order ───────────────────────────────────────────────────────────
+# â”€â”€ 1. Create order â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/", response_model=dict, status_code=201)
 def create_order_from_frontend(
@@ -86,7 +86,7 @@ def create_order_from_frontend(
     order_items = []
 
     for cart_item in cart.items:
-        # FIX: lock the product row for this transaction — prevents race conditions
+        # FIX: lock the product row for this transaction â€” prevents race conditions
         product = db.execute(
             select(models.Product)
             .where(models.Product.id == cart_item.product_id)
@@ -143,7 +143,7 @@ def create_order_from_frontend(
     ))
     db.commit()  # lock released here; all stock decrements are now visible atomically
 
-    # FIX: pass user_id not db — background task opens its own session
+    # FIX: pass user_id not db â€” background task opens its own session
     background_tasks.add_task(_clear_cart, current_user.id)
 
     logger.info("Order #%s created for user %s, Razorpay=%s", new_order.id, current_user.id, rz_order["id"])
@@ -157,7 +157,7 @@ def create_order_from_frontend(
     }
 
 
-# ── 2. Legacy checkout route (kept for compatibility) ─────────────────────────
+# â”€â”€ 2. Legacy checkout route (kept for compatibility) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/checkout", response_model=dict, status_code=201)
 def checkout(
@@ -166,7 +166,7 @@ def checkout(
     db:               Session = Depends(get_db),
     current_user:     models.User = Depends(get_current_user),
 ):
-    """Legacy route — same race-condition fixes applied."""
+    """Legacy route â€” same race-condition fixes applied."""
     cart = (
         db.query(models.Cart)
         .options(joinedload(models.Cart.items))
@@ -231,19 +231,19 @@ def checkout(
     }
 
 
-# ── 3. Confirm payment ────────────────────────────────────────────────────────
+# â”€â”€ 3. Confirm payment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/{order_id}/confirm-payment")
 def confirm_payment(
     order_id: int,
-    payload:  schemas.PaymentConfirm,      # FIX: new schema — requires all 3 Razorpay fields
+    payload:  schemas.PaymentConfirm,      # FIX: new schema â€” requires all 3 Razorpay fields
     db:       Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
     """
     FIX 1: Verifies the Razorpay HMAC-SHA256 signature before marking as Paid.
             Without this any user can send fake payment data and get goods for free.
-    FIX 2: Idempotency guard — a Paid order cannot be downgraded.
+    FIX 2: Idempotency guard â€” a Paid order cannot be downgraded.
     """
     order = db.query(models.Order).filter(
         models.Order.id      == order_id,
@@ -256,14 +256,15 @@ def confirm_payment(
     if order.razorpay_order_id != payload.razorpay_order_id:
         raise HTTPException(status_code=400, detail="Razorpay order ID mismatch.")
 
-    # FIX: Idempotency — never overwrite a completed payment
+    # FIX: Idempotency â€” never overwrite a completed payment
     if order.payment_status == "Paid":
         return {"status": "success", "message": "Order is already marked as paid."}
 
     # FIX: Cryptographic signature verification
     key_secret = os.getenv("RAZORPAY_KEY_SECRET", "").encode()
     body       = f"{payload.razorpay_order_id}|{payload.razorpay_payment_id}".encode()
-    expected   = hmac.new(key_secret, body, hashlib.sha256).hexdigest()
+    # BUG 8 FIX: use digestmod= keyword arg
+    expected   = hmac.new(key_secret, body, digestmod=hashlib.sha256).hexdigest()
 
     if not hmac.compare_digest(expected, payload.razorpay_signature):
         logger.warning(
@@ -286,7 +287,7 @@ def confirm_payment(
     return {"status": "success", "message": f"Order #{order_id} payment confirmed."}
 
 
-# ── 4. List my orders ─────────────────────────────────────────────────────────
+# â”€â”€ 4. List my orders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/", response_model=schemas.OrderListResponse)
 def list_my_orders(
@@ -297,7 +298,7 @@ def list_my_orders(
 ):
     """
     FIX: Replaces the N+1 loop (one COUNT query per order) with a single
-         GROUP BY subquery — all item counts fetched in one DB round-trip.
+         GROUP BY subquery â€” all item counts fetched in one DB round-trip.
     """
     # Subquery: item_count per order
     item_count_sq = (
@@ -333,7 +334,7 @@ def list_my_orders(
     return schemas.OrderListResponse(orders=result)
 
 
-# ── 5. Order detail ───────────────────────────────────────────────────────────
+# â”€â”€ 5. Order detail â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/{order_id}", response_model=schemas.OrderResponse)
 def get_order(
@@ -355,7 +356,7 @@ def get_order(
     return order
 
 
-# ── 6. Track order ────────────────────────────────────────────────────────────
+# â”€â”€ 6. Track order â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/{order_id}/track", response_model=schemas.TrackingResponse)
 def track_order(
@@ -383,7 +384,7 @@ def track_order(
     )
 
 
-# ── 7. Cancel order ───────────────────────────────────────────────────────────
+# â”€â”€ 7. Cancel order â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/{order_id}/cancel")
 def cancel_order(
