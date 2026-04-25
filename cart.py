@@ -27,13 +27,17 @@ def _cart_response(db: Session, user) -> schemas.CartResponse:
     return cr
 
 
-# ── GET CART ──────────────────────────────────────────────────────────────────
+# â”€â”€ GET CART â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/", response_model=schemas.CartResponse)
 def view_cart(db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     return _cart_response(db, current_user)
 
 
-# ── ADD ITEM ──────────────────────────────────────────────────────────────────
+# â”€â”€ ADD ITEM â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Maximum number of distinct product lines allowed in a single cart.
+# Prevents DoS: GET /cart/ loads every item.product eagerly.
+_MAX_CART_ITEMS = 25
+
 @router.post("/add", response_model=schemas.CartResponse)
 def add_to_cart(
     item_data: schemas.CartItemAdd,
@@ -43,9 +47,26 @@ def add_to_cart(
     product = db.query(models.Product).filter(models.Product.id == item_data.product_id).first()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found.")
+    if not product.is_active:
+        raise HTTPException(status_code=400, detail="This product is no longer available.")
     if product.stock_quantity < item_data.quantity:
         raise HTTPException(status_code=400, detail="Not enough stock available.")
     cart = get_user_cart(db, current_user.id)
+
+    # SECURITY FIX: cap total distinct items to prevent DoS via cart explosion
+    existing_count = db.query(models.CartItem).filter(
+        models.CartItem.cart_id == cart.id
+    ).count()
+    is_new_product = not db.query(models.CartItem).filter(
+        models.CartItem.cart_id == cart.id,
+        models.CartItem.product_id == item_data.product_id,
+    ).first()
+    if is_new_product and existing_count >= _MAX_CART_ITEMS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cart limit reached. A cart can hold at most {_MAX_CART_ITEMS} different items."
+        )
+
     existing = db.query(models.CartItem).filter(
         models.CartItem.cart_id == cart.id,
         models.CartItem.product_id == item_data.product_id,
@@ -59,14 +80,14 @@ def add_to_cart(
     return _cart_response(db, current_user)
 
 
-# ── UPDATE ITEM QUANTITY (by product_id) ──────────────────────────────────────
+# â”€â”€ UPDATE ITEM QUANTITY (by product_id) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.put("/update", response_model=schemas.CartResponse)
 def update_cart_item(
     item_data: schemas.CartItemUpdate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """PUT /cart/update — used by API.cart.update(productId, quantity)"""
+    """PUT /cart/update â€” used by API.cart.update(productId, quantity)"""
     if item_data.quantity < 1:
         raise HTTPException(status_code=400, detail="Quantity must be at least 1.")
     cart = get_user_cart(db, current_user.id)
@@ -84,7 +105,7 @@ def update_cart_item(
     return _cart_response(db, current_user)
 
 
-# ── REMOVE BY ITEM ID (used by CartSidebar and Cart components directly) ──────
+# â”€â”€ REMOVE BY ITEM ID (used by CartSidebar and Cart components directly) â”€â”€â”€â”€â”€â”€
 @router.delete("/remove/{item_id}")
 def remove_from_cart(
     item_id: int,
@@ -103,13 +124,13 @@ def remove_from_cart(
     return {"status": "success", "message": "Item removed from cart."}
 
 
-# ── CLEAR ENTIRE CART ─────────────────────────────────────────────────────────
+# â”€â”€ CLEAR ENTIRE CART â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.delete("/clear")
 def clear_cart(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """DELETE /cart/clear — called by CheckoutPage after order is placed."""
+    """DELETE /cart/clear â€” called by CheckoutPage after order is placed."""
     cart = get_user_cart(db, current_user.id)
     db.query(models.CartItem).filter(models.CartItem.cart_id == cart.id).delete()
     db.commit()

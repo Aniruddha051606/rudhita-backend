@@ -1,25 +1,17 @@
 """
-models.py  —  Rudhita Database Models (PATCHED)
+models.py  — Rudhita Database Models
 
-Changes from audit:
-  - Float -> Numeric(10, 2) for ALL money columns (prevents precision loss on totals)
+Changes:
+  - Float -> Numeric(10, 2) for ALL money columns (prevents precision loss)
   - User.is_verified: Integer -> Boolean
   - Added RefreshToken  (for /auth/refresh flow)
   - Added TokenBlocklist (for /auth/logout token revocation)
   - Added AuditLog      (admin action trail)
+  - OTP: added fail_count to lock out brute-force attempts after 5 wrong guesses
 
 MIGRATION NOTE:
-  If you have an existing database, run these SQL statements before deploying:
-    ALTER TABLE products
-        ALTER COLUMN price TYPE NUMERIC(10,2),
-        ALTER COLUMN original_price TYPE NUMERIC(10,2);
-    ALTER TABLE orders
-        ALTER COLUMN total_amount TYPE NUMERIC(10,2);
-    ALTER TABLE order_items
-        ALTER COLUMN price_at_purchase TYPE NUMERIC(10,2);
-    ALTER TABLE users
-        ALTER COLUMN is_verified TYPE BOOLEAN USING (is_verified::boolean);
-  Then run:  alembic upgrade head  (after setting up Alembic)
+  If upgrading an existing DB, run:
+    ALTER TABLE otps ADD COLUMN IF NOT EXISTS fail_count INTEGER NOT NULL DEFAULT 0;
 """
 
 from sqlalchemy import (
@@ -36,15 +28,15 @@ class User(Base):
     id             = Column(Integer, primary_key=True, index=True)
     name           = Column(String(100), nullable=False)
     email          = Column(String(150), unique=True, nullable=False, index=True)
-    password_hash  = Column(String(255), nullable=False)            # FIX: was nullable=True
+    password_hash  = Column(String(255), nullable=False)
     phone          = Column(String(20))
-    is_verified    = Column(Boolean, default=False, nullable=False)  # FIX: was Integer
+    is_verified    = Column(Boolean, default=False, nullable=False)
     is_admin       = Column(Boolean, default=False)
     created_at     = Column(DateTime(timezone=True), server_default=func.now())
-    orders         = relationship("Order", back_populates="owner", lazy="select")
-    cart           = relationship("Cart", back_populates="user", uselist=False)
-    addresses      = relationship("Address", back_populates="user", cascade="all, delete-orphan")
-    refresh_tokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
+    orders         = relationship("Order",        back_populates="owner",   lazy="select")
+    cart           = relationship("Cart",         back_populates="user",    uselist=False)
+    addresses      = relationship("Address",      back_populates="user",    cascade="all, delete-orphan")
+    refresh_tokens = relationship("RefreshToken", back_populates="user",    cascade="all, delete-orphan")
 
 
 class Address(Base):
@@ -69,25 +61,26 @@ class Product(Base):
     name           = Column(String(200), nullable=False)
     description    = Column(Text)
     category       = Column(String(100), index=True)
-    price          = Column(Numeric(10, 2), nullable=False)          # FIX: was Float
-    original_price = Column(Numeric(10, 2))                          # FIX: was Float
+    price          = Column(Numeric(10, 2), nullable=False)
+    original_price = Column(Numeric(10, 2))
     stock_quantity = Column(Integer, default=0, nullable=False)
     weight_grams   = Column(Integer, default=0, nullable=False)
     image_url      = Column(String(500))
     is_active      = Column(Boolean, default=True)
     created_at     = Column(DateTime(timezone=True), server_default=func.now())
-    __table_args__  = (Index("ix_products_category_price", "category", "price"),)
+    __table_args__ = (Index("ix_products_category_price", "category", "price"),)
 
 
 class Order(Base):
     __tablename__ = "orders"
     id                  = Column(Integer, primary_key=True, index=True)
     user_id             = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    total_amount        = Column(Numeric(10, 2), nullable=False)     # FIX: was Float
+    total_amount        = Column(Numeric(10, 2), nullable=False)
     payment_status      = Column(String(50), default="Pending", index=True)
     shipping_status     = Column(String(50), default="Pending", index=True)
     razorpay_order_id   = Column(String(100), index=True)
     razorpay_payment_id = Column(String(100))
+    razorpay_refund_id  = Column(String(100))  # NEW: stores refund ID after refund is initiated
     delhivery_waybill   = Column(String(100), index=True)
     shipping_address    = Column(Text, nullable=False)
     created_at          = Column(DateTime(timezone=True), server_default=func.now())
@@ -106,8 +99,8 @@ class OrderItem(Base):
     order_id          = Column(Integer, ForeignKey("orders.id"), nullable=False, index=True)
     product_id        = Column(Integer, ForeignKey("products.id"), nullable=False)
     quantity          = Column(Integer, nullable=False, default=1)
-    price_at_purchase = Column(Numeric(10, 2), nullable=False)       # FIX: was Float
-    order   = relationship("Order", back_populates="items")
+    price_at_purchase = Column(Numeric(10, 2), nullable=False)
+    order   = relationship("Order",   back_populates="items")
     product = relationship("Product")
 
 
@@ -126,8 +119,10 @@ class OTP(Base):
     __tablename__ = "otps"
     id         = Column(Integer, primary_key=True, index=True)
     email      = Column(String(150), nullable=False, index=True)
-    otp_code   = Column(String(64), nullable=False)  # FIX: stores HMAC hash now, needs 64 chars
+    otp_code   = Column(String(64),  nullable=False)  # HMAC-SHA256 hex digest
     expires_at = Column(DateTime(timezone=True), nullable=False)
+    # NEW: tracks wrong attempts — locked out after 5 failures, prevents brute force
+    fail_count = Column(Integer, nullable=False, default=0)
 
 
 class Cart(Base):
@@ -145,11 +140,10 @@ class CartItem(Base):
     cart_id    = Column(Integer, ForeignKey("carts.id"), nullable=False)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     quantity   = Column(Integer, default=1, nullable=False)
-    cart    = relationship("Cart", back_populates="items")
+    cart    = relationship("Cart",    back_populates="items")
     product = relationship("Product")
 
 
-# ── NEW: Refresh token storage (one row per active session) ──────────────────
 class RefreshToken(Base):
     __tablename__ = "refresh_tokens"
     id         = Column(Integer, primary_key=True, index=True)
@@ -160,21 +154,19 @@ class RefreshToken(Base):
     user       = relationship("User", back_populates="refresh_tokens")
 
 
-# ── NEW: Token blocklist (revoked JTIs so logout actually works) ─────────────
 class TokenBlocklist(Base):
     __tablename__ = "token_blocklist"
     id         = Column(Integer, primary_key=True, index=True)
     jti        = Column(String(64), unique=True, nullable=False, index=True)
-    expires_at = Column(DateTime(timezone=True), nullable=False)  # for cleanup job
+    expires_at = Column(DateTime(timezone=True), nullable=False)
 
 
-# ── NEW: Admin audit log ─────────────────────────────────────────────────────
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id          = Column(Integer, primary_key=True, index=True)
     actor_id    = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    action      = Column(String(100), nullable=False)   # e.g. "make_admin", "update_order_status"
-    target_type = Column(String(50))                    # e.g. "User", "Order"
+    action      = Column(String(100), nullable=False)
+    target_type = Column(String(50))
     target_id   = Column(Integer)
-    detail      = Column(Text)                          # JSON string for extra context
+    detail      = Column(Text)
     created_at  = Column(DateTime(timezone=True), server_default=func.now(), index=True)
