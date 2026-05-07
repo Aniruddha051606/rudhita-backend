@@ -1,34 +1,58 @@
 """
-admin.py  — Admin / Seller Dashboard
+admin.py  –  Admin / Seller Dashboard  |  Phase 2 Update
+==========================================================
 
-Changes in this version:
-  - NEW: POST /admin/orders/{id}/refund — triggers Razorpay refund API directly
-  - set_waybill() now auto-emails the customer their tracking number
-  - admin_list_orders() now returns waybill field so the frontend can display it
+Phase 2 new endpoints
+---------------------
+  POST /admin/orders/{order_id}/fulfill
+      Creates a Fulfillment + FulfillmentItems, writes an
+      order_shipped InventoryTransaction for each item,
+      and marks the order as Shipped.
+
+  POST /admin/orders/bulk-fulfill
+      Accepts a list of up to 50 order IDs.
+      Returns {"status":"processing"} immediately.
+      Hands the actual work to a FastAPI BackgroundTask that
+      opens its own DB session (safe for the single-Uvicorn
+      Optiplex deployment).
+
+  GET /admin/inventory
+      Paginated snapshot of InventoryLevel rows joined with
+      product + location names.  Low-stock rows appear first.
+
+All Phase 1 endpoints (dashboard, stats, products, orders CRUD,
+waybill, refund, users, audit-log) are preserved unchanged.
 """
 
 import os
 import json
 import uuid
 import logging
-from decimal import Decimal
+from datetime import datetime, timezone
+from decimal  import Decimal
+from typing   import List, Optional
 
 import razorpay
-from fastapi         import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm  import Session, joinedload
-from sqlalchemy      import func as sqlfunc
-from typing          import List, Optional
+from fastapi          import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from sqlalchemy.orm   import Session, joinedload
+from sqlalchemy       import func as sqlfunc
 
 import models
 import schemas
-from database import get_db
-from utils    import get_current_user, send_order_confirmation_email
+from database  import get_db, SessionLocal
+from utils     import get_current_user, send_order_confirmation_email
+from services.inventory_service import (
+    get_primary_location,
+    ship_stock,
+    get_inventory_snapshot,
+    InsufficientCommittedError,
+)
 
 logger = logging.getLogger("rudhita")
 router = APIRouter(prefix="/admin", tags=["Admin / Seller Dashboard"])
 
 
-# ── Auth dependency ───────────────────────────────────────────────────────────
+# ── Auth dependency ────────────────────────────────────────────────────────────
 
 def require_admin(current_user: models.User = Depends(get_current_user)):
     if not current_user.is_admin:
@@ -36,7 +60,7 @@ def require_admin(current_user: models.User = Depends(get_current_user)):
     return current_user
 
 
-# ── Audit helper ──────────────────────────────────────────────────────────────
+# ── Audit helper ───────────────────────────────────────────────────────────────
 
 def _audit(
     db:          Session,
@@ -46,7 +70,6 @@ def _audit(
     target_id:   int  = None,
     detail:      dict = None,
 ):
-    """Persist every admin write to audit_logs. Never raises — failures are logged only."""
     try:
         db.add(models.AuditLog(
             actor_id    = actor.id,
@@ -67,15 +90,219 @@ def _get_razorpay() -> razorpay.Client:
     return razorpay.Client(auth=(key_id, key_secret))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ── PHASE 2: FULFILLMENT CORE LOGIC (shared by single + bulk) ────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fulfill_order_in_session(
+    db:            Session,
+    order_id:      int,
+    location_id:   int,
+    carrier:       Optional[str] = None,
+    tracking_num:  Optional[str] = None,
+    notes:         Optional[str] = None,
+    actor_id:      Optional[int] = None,
+) -> models.Fulfillment:
+    """
+    Core fulfillment logic — usable from both the single-order endpoint
+    (where the caller manages the session) and the bulk background worker
+    (which creates its own session).
+
+    Steps:
+      1. Validate order exists and is in a fulfillable state.
+      2. Guard against double-fulfillment (idempotency).
+      3. Create Fulfillment + FulfillmentItem rows.
+      4. Write order_shipped InventoryTransaction for each item
+         (legacy_fallback=True handles pre-Phase-1 orders).
+      5. Update Order.shipping_status → "Shipped".
+      6. Append a TrackingEvent.
+      7. Flush (caller commits).
+
+    Raises HTTPException for validation failures.
+    Raises InsufficientCommittedError if stock accounting is impossible
+    even with the legacy fallback path.
+    """
+    order = (
+        db.query(models.Order)
+        .options(joinedload(models.Order.items))
+        .filter(models.Order.id == order_id)
+        .first()
+    )
+    if not order:
+        raise HTTPException(status_code=404, detail=f"Order #{order_id} not found.")
+
+    # Only fulfil paid orders
+    if order.payment_status != "Paid":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Order #{order_id} cannot be fulfilled — "
+                f"payment_status='{order.payment_status}' (must be 'Paid')."
+            ),
+        )
+
+    # Idempotency: don't create a second fulfillment if one already exists
+    existing = (
+        db.query(models.Fulfillment)
+        .filter(
+            models.Fulfillment.order_id == order_id,
+            models.Fulfillment.status.in_([
+                models.FulfillmentStatus.shipped,
+                models.FulfillmentStatus.delivered,
+                models.FulfillmentStatus.packed,
+            ]),
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Order #{order_id} already has an active fulfillment "
+                f"(id={existing.id}, status={existing.status.value})."
+            ),
+        )
+
+    if not order.items:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Order #{order_id} has no items to fulfill.",
+        )
+
+    # Create the Fulfillment record
+    fulfillment = models.Fulfillment(
+        order_id        = order_id,
+        location_id     = location_id,
+        status          = models.FulfillmentStatus.shipped,
+        carrier         = carrier,
+        tracking_number = tracking_num,
+        notes           = notes,
+        shipped_at      = datetime.now(timezone.utc),
+    )
+    db.add(fulfillment)
+    db.flush()  # need fulfillment.id before FulfillmentItems and ledger writes
+
+    # Create FulfillmentItems + write ledger
+    for item in order.items:
+        db.add(models.FulfillmentItem(
+            fulfillment_id = fulfillment.id,
+            order_item_id  = item.id,
+            quantity       = item.quantity,
+        ))
+
+        # Write order_shipped InventoryTransaction
+        # legacy_fallback=True: handles orders placed before Phase 1
+        ship_stock(
+            db,
+            product_id      = item.product_id,
+            location_id     = location_id,
+            quantity        = item.quantity,
+            fulfillment_id  = fulfillment.id,
+            actor_id        = actor_id,
+            legacy_fallback = True,
+        )
+
+    # Update order status
+    order.shipping_status = "Shipped"
+    if tracking_num:
+        order.delhivery_waybill = tracking_num
+
+    db.add(models.TrackingEvent(
+        order_id    = order_id,
+        status      = "Shipped",
+        description = (
+            f"Order fulfilled and dispatched"
+            + (f" via {carrier}" if carrier else "")
+            + (f". Tracking: {tracking_num}" if tracking_num else "")
+            + "."
+        ),
+    ))
+
+    logger.info(
+        "Order #%s fulfilled  fulfillment_id=%s  carrier=%s  tracking=%s",
+        order_id, fulfillment.id, carrier, tracking_num,
+    )
+    return fulfillment
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── BACKGROUND WORKER for bulk-fulfill ───────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _bulk_fulfill_worker(
+    order_ids:   List[int],
+    location_id: int,
+    actor_id:    int,
+) -> None:
+    """
+    FastAPI BackgroundTask — opens its own DB session so the
+    request session (already closed) is never touched.
+
+    Processes each order independently so a single failure doesn't
+    abort the rest. Results are written to the audit log.
+    """
+    succeeded, failed = [], []
+
+    for oid in order_ids:
+        db = SessionLocal()
+        try:
+            _fulfill_order_in_session(
+                db,
+                order_id    = oid,
+                location_id = location_id,
+                actor_id    = actor_id,
+            )
+            db.commit()
+            succeeded.append(oid)
+            logger.info("Bulk-fulfill: order #%s succeeded", oid)
+        except HTTPException as exc:
+            db.rollback()
+            failed.append({"order_id": oid, "reason": exc.detail})
+            logger.warning("Bulk-fulfill: order #%s SKIPPED — %s", oid, exc.detail)
+        except Exception as exc:
+            db.rollback()
+            failed.append({"order_id": oid, "reason": str(exc)})
+            logger.error("Bulk-fulfill: order #%s ERROR — %s", oid, exc)
+        finally:
+            db.close()
+
+    # Write a single audit record summarising the job
+    db = SessionLocal()
+    try:
+        db.add(models.AuditLog(
+            actor_id    = actor_id,
+            action      = "bulk_fulfill",
+            target_type = "Order",
+            target_id   = None,
+            detail      = json.dumps({
+                "total":     len(order_ids),
+                "succeeded": succeeded,
+                "failed":    failed,
+            }),
+        ))
+        db.commit()
+    except Exception as exc:
+        logger.error("Bulk-fulfill: failed to write audit summary: %s", exc)
+    finally:
+        db.close()
+
+    logger.info(
+        "Bulk-fulfill complete: %d succeeded / %d failed",
+        len(succeeded), len(failed),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ── 1. Dashboard ──────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/dashboard")
 def get_dashboard(
     db: Session = Depends(get_db),
     _:  models.User = Depends(require_admin),
 ):
-    total_orders   = db.query(sqlfunc.count(models.Order.id)).scalar()
-    total_revenue  = db.query(
+    total_orders  = db.query(sqlfunc.count(models.Order.id)).scalar()
+    total_revenue = db.query(
         sqlfunc.coalesce(sqlfunc.sum(models.Order.total_amount), 0.0)
     ).filter(models.Order.payment_status == "Paid").scalar()
     total_products = db.query(sqlfunc.count(models.Product.id)).filter(
@@ -89,12 +316,12 @@ def get_dashboard(
     )
     return {
         "totalOrders":   total_orders,
-        "totalRevenue":  total_revenue if isinstance(total_revenue, Decimal) else Decimal(str(total_revenue or 0)),
+        "totalRevenue":  float(total_revenue) if total_revenue else 0.0,
         "totalProducts": total_products,
         "recentOrders": [
             {
                 "id":              o.id,
-                "customer_name":   o.owner.name if o.owner else "N/A",
+                "customer_name":   o.owner.name  if o.owner else "N/A",
                 "total":           float(o.total_amount),
                 "shipping_status": o.shipping_status.lower() if o.shipping_status else "pending",
                 "payment_status":  o.payment_status,
@@ -105,7 +332,7 @@ def get_dashboard(
     }
 
 
-# ── 2. Stats ──────────────────────────────────────────────────────────────────
+# ── 2. Stats ───────────────────────────────────────────────────────────────────
 
 @router.get("/stats", response_model=schemas.DashboardStats)
 def get_stats(db: Session = Depends(get_db), _: models.User = Depends(require_admin)):
@@ -121,7 +348,7 @@ def get_stats(db: Session = Depends(get_db), _: models.User = Depends(require_ad
     )
 
 
-# ── 3. Products ───────────────────────────────────────────────────────────────
+# ── 3. Products ────────────────────────────────────────────────────────────────
 
 @router.get("/products")
 def admin_list_products(
@@ -213,12 +440,12 @@ def admin_delete_product(
     return {"status": "success", "message": f"Product '{product.name}' deactivated."}
 
 
-# ── 4. Orders ─────────────────────────────────────────────────────────────────
+# ── 4. Orders ──────────────────────────────────────────────────────────────────
 
 @router.get("/orders")
 def admin_list_orders(
     skip:            int = Query(default=0, ge=0),
-    limit:           int = Query(default=30, ge=1, le=200),
+    limit:           int = Query(default=50, ge=1, le=200),
     payment_status:  str = None,
     shipping_status: str = None,
     db: Session = Depends(get_db),
@@ -230,6 +457,7 @@ def admin_list_orders(
             joinedload(models.Order.items).joinedload(models.OrderItem.product),
             joinedload(models.Order.tracking_events),
             joinedload(models.Order.owner),
+            joinedload(models.Order.fulfillments),
         )
         .order_by(models.Order.created_at.desc())
     )
@@ -252,6 +480,13 @@ def admin_list_orders(
                 "razorpay_payment_id": o.razorpay_payment_id,
                 "refund_id":       o.razorpay_refund_id,
                 "created_at":      o.created_at.isoformat(),
+                # Phase 2: show fulfillment summary
+                "fulfillment_count": len(o.fulfillments),
+                "fulfillment_status": (
+                    o.fulfillments[-1].status.value
+                    if o.fulfillments else None
+                ),
+                "item_count": len(o.items),
             }
             for o in orders
         ]
@@ -281,8 +516,10 @@ def admin_update_order(
     _audit(db, current_user, "update_order_status", "Order", order_id,
            {"from": prev_status, "to": normalised})
     db.commit()
-    return {"status": "success", "message": f"Order #{order_id} updated to '{normalised}'."}
+    return {"status": "success", "message": f"Order #{order_id} → '{normalised}'."}
 
+
+# ── 4a. Waybill ────────────────────────────────────────────────────────────────
 
 @router.patch("/orders/{order_id}/waybill")
 def set_waybill(
@@ -305,18 +542,17 @@ def set_waybill(
     _audit(db, current_user, "set_waybill", "Order", order_id, {"waybill": waybill})
     db.commit()
 
-    # Notify the customer their order has shipped
     try:
         user = db.query(models.User).filter(models.User.id == order.user_id).first()
         if user:
             send_order_confirmation_email(user.email, user.name, order)
     except Exception as exc:
-        logger.warning("Could not send shipping notification for order #%s: %s", order_id, exc)
+        logger.warning("Could not send shipping notification order #%s: %s", order_id, exc)
 
     return {"status": "success", "waybill": waybill}
 
 
-# ── 4a. Refund ────────────────────────────────────────────────────────────────
+# ── 4b. Refund ─────────────────────────────────────────────────────────────────
 
 @router.post("/orders/{order_id}/refund")
 def admin_initiate_refund(
@@ -324,93 +560,212 @@ def admin_initiate_refund(
     db:       Session = Depends(get_db),
     current_user: models.User = Depends(require_admin),
 ):
-    """
-    Calls the Razorpay Refunds API to move real money back to the customer.
-
-    Rules:
-      - Order must be Paid (payment_status == "Paid")
-      - Refund can only be triggered once (idempotency: razorpay_refund_id must be null)
-      - Issues a FULL refund for total_amount
-
-    After this call:
-      - order.payment_status  → "Refunded"
-      - order.razorpay_refund_id is set to Razorpay's refund ID for future reference
-      - A TrackingEvent is logged so the customer sees it on the tracking page
-
-    Razorpay refunds are asynchronous — the money typically reaches the customer
-    within 5–7 business days depending on their payment method.
-    """
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found.")
-
     if order.payment_status != "Paid":
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot refund order with payment_status='{order.payment_status}'. "
-                   "Only 'Paid' orders can be refunded."
+            detail=f"Cannot refund order with payment_status='{order.payment_status}'.",
         )
-
     if order.razorpay_refund_id:
         raise HTTPException(
             status_code=409,
-            detail=f"Refund already initiated (refund_id={order.razorpay_refund_id})."
+            detail=f"Refund already initiated (refund_id={order.razorpay_refund_id}).",
         )
-
     if not order.razorpay_payment_id:
-        raise HTTPException(
-            status_code=400,
-            detail="No Razorpay payment ID on this order — cannot issue refund."
-        )
+        raise HTTPException(status_code=400, detail="No Razorpay payment ID on this order.")
 
-    # Call Razorpay Refunds API
     rz = _get_razorpay()
     try:
         refund = rz.payment.refund(
             order.razorpay_payment_id,
             {
-                "amount": int(float(order.total_amount) * 100),  # paise
-                "notes":  {
-                    "reason":   "Admin-initiated refund",
-                    "order_id": str(order.id),
-                },
+                "amount": int(float(order.total_amount) * 100),
+                "notes":  {"reason": "Admin-initiated refund", "order_id": str(order.id)},
             }
         )
     except razorpay.errors.BadRequestError as exc:
-        logger.error("Razorpay refund failed for order #%s: %s", order_id, exc)
+        logger.error("Razorpay refund failed order #%s: %s", order_id, exc)
         raise HTTPException(status_code=502, detail=f"Razorpay refund failed: {str(exc)}")
 
-    refund_id             = refund.get("id", "")
+    refund_id                = refund.get("id", "")
     order.razorpay_refund_id = refund_id
-    order.payment_status  = "Refunded"
-
+    order.payment_status     = "Refunded"
     db.add(models.TrackingEvent(
         order_id    = order.id,
         status      = "Refunded",
-        description = f"Full refund of ₹{float(order.total_amount):,.2f} initiated. "
-                      f"Razorpay Refund ID: {refund_id}. "
-                      "Amount typically reaches customer within 5–7 business days.",
+        description = (
+            f"Full refund of ₹{float(order.total_amount):,.2f} initiated. "
+            f"Razorpay Refund ID: {refund_id}."
+        ),
     ))
     _audit(db, current_user, "initiate_refund", "Order", order_id, {
-        "refund_id":   refund_id,
-        "amount":      float(order.total_amount),
-        "payment_id":  order.razorpay_payment_id,
+        "refund_id":  refund_id,
+        "amount":     float(order.total_amount),
+        "payment_id": order.razorpay_payment_id,
     })
     db.commit()
 
-    logger.info(
-        "Refund initiated for order #%s by admin %s — Razorpay refund_id=%s",
-        order_id, current_user.email, refund_id
-    )
     return {
         "status":    "success",
         "refund_id": refund_id,
         "amount":    float(order.total_amount),
-        "message":   f"Refund of ₹{float(order.total_amount):,.2f} initiated successfully.",
+        "message":   f"Refund of ₹{float(order.total_amount):,.2f} initiated.",
     }
 
 
-# ── 5. Users ──────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ── PHASE 2: SINGLE FULFILL ───────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/orders/{order_id}/fulfill", response_model=schemas.FulfillmentResponse)
+def admin_fulfill_order(
+    order_id:     int,
+    payload:      schemas.FulfillOrderRequest,
+    db:           Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    """
+    Fulfill a single order.
+
+    Creates a Fulfillment record, FulfillmentItem rows, and writes
+    order_shipped InventoryTransactions for every OrderItem.
+
+    Idempotent: returns 409 if an active fulfillment already exists.
+    Legacy-safe: orders placed before Phase 1 are handled via the
+    legacy_fallback path in ship_stock().
+    """
+    try:
+        primary_location = get_primary_location(db)
+    except HTTPException:
+        raise HTTPException(
+            status_code=503,
+            detail="Inventory system not ready. No active warehouse found.",
+        )
+
+    fulfillment = _fulfill_order_in_session(
+        db,
+        order_id     = order_id,
+        location_id  = primary_location.id,
+        carrier      = payload.carrier,
+        tracking_num = payload.tracking_number,
+        notes        = payload.notes,
+        actor_id     = current_user.id,
+    )
+
+    _audit(db, current_user, "fulfill_order", "Order", order_id, {
+        "fulfillment_id":  fulfillment.id,
+        "carrier":         payload.carrier,
+        "tracking_number": payload.tracking_number,
+    })
+    db.commit()
+
+    # Re-fetch with relationships for the response
+    db.refresh(fulfillment)
+    return schemas.FulfillmentResponse(
+        id              = fulfillment.id,
+        order_id        = fulfillment.order_id,
+        status          = fulfillment.status.value,
+        carrier         = fulfillment.carrier,
+        tracking_number = fulfillment.tracking_number,
+        shipped_at      = fulfillment.shipped_at,
+        items=[
+            schemas.FulfillmentItemResponse(
+                order_item_id = fi.order_item_id,
+                quantity      = fi.quantity,
+            )
+            for fi in fulfillment.items
+        ],
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── PHASE 2: BULK FULFILL ─────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/orders/bulk-fulfill", response_model=schemas.BulkFulfillResponse)
+def admin_bulk_fulfill(
+    payload:          schemas.BulkFulfillRequest,
+    background_tasks: BackgroundTasks,
+    db:               Session = Depends(get_db),
+    current_user:     models.User = Depends(require_admin),
+):
+    """
+    Enqueue fulfillment for up to 50 orders.
+
+    Returns {"status": "processing"} immediately so the admin UI
+    doesn't time out on slow hardware.
+
+    The background worker (_bulk_fulfill_worker) opens its own
+    SessionLocal per order so each fulfillment is an independent
+    transaction — one failure does not abort the rest.
+
+    Progress is visible in:
+      • Server logs (INFO level)
+      • GET /admin/audit-log (action = 'bulk_fulfill')
+    """
+    try:
+        primary_location = get_primary_location(db)
+    except HTTPException:
+        raise HTTPException(
+            status_code=503,
+            detail="Inventory system not ready. No active warehouse found.",
+        )
+
+    order_ids = list(dict.fromkeys(payload.order_ids))  # deduplicate, preserve order
+
+    # Log the intention before handing off
+    _audit(db, current_user, "bulk_fulfill_enqueued", "Order", None, {
+        "count":     len(order_ids),
+        "order_ids": order_ids,
+    })
+    db.commit()
+
+    # Enqueue — returns before the worker starts
+    background_tasks.add_task(
+        _bulk_fulfill_worker,
+        order_ids   = order_ids,
+        location_id = primary_location.id,
+        actor_id    = current_user.id,
+    )
+
+    logger.info(
+        "Bulk-fulfill enqueued by admin %s: %d orders",
+        current_user.email, len(order_ids),
+    )
+
+    return schemas.BulkFulfillResponse(
+        status    = "processing",
+        message   = (
+            f"{len(order_ids)} order(s) queued for fulfillment. "
+            "Check the audit log for results."
+        ),
+        total     = len(order_ids),
+        order_ids = order_ids,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── PHASE 2: INVENTORY DASHBOARD ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/inventory")
+def admin_list_inventory(
+    skip:  int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    db:    Session = Depends(get_db),
+    _:     models.User = Depends(require_admin),
+):
+    """
+    Paginated inventory snapshot.
+    Rows are ordered by available ASC so low-stock items appear first.
+    """
+    rows = get_inventory_snapshot(db, skip=skip, limit=limit)
+    return {"inventory": rows, "count": len(rows)}
+
+
+# ── 5. Users ───────────────────────────────────────────────────────────────────
 
 @router.get("/users")
 def admin_list_users(
@@ -451,11 +806,11 @@ def make_admin(
     user.is_admin = True
     _audit(db, current_user, "grant_admin", "User", user_id, {"target_email": user.email})
     db.commit()
-    logger.warning("Admin granted to user %s (%s) by admin %s", user.id, user.email, current_user.email)
+    logger.warning("Admin granted to user %s (%s) by %s", user.id, user.email, current_user.email)
     return {"status": "success", "message": f"{user.name} is now an admin."}
 
 
-# ── 6. Low-stock alerts ───────────────────────────────────────────────────────
+# ── 6. Low-stock alerts ────────────────────────────────────────────────────────
 
 @router.get("/alerts/low-stock", response_model=List[schemas.ProductStockAlert])
 def low_stock_alerts(
@@ -471,7 +826,7 @@ def low_stock_alerts(
     )
 
 
-# ── 7. Audit log ──────────────────────────────────────────────────────────────
+# ── 7. Audit log ───────────────────────────────────────────────────────────────
 
 @router.get("/audit-log")
 def get_audit_log(

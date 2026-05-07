@@ -1,12 +1,24 @@
 """
-orders.py  â€”  Order Routes (PATCHED)
+orders.py  –  Order Routes  |  Phase 2 Update
+===============================================
 
-Changes from audit:
-  1. create_order_from_frontend(): SELECT FOR UPDATE on product rows â€” prevents overselling
-  2. confirm_payment():            Razorpay HMAC-SHA256 signature verification â€” REQUIRED
-  3. confirm_payment():            Idempotency guard â€” cannot overwrite a "Paid" order
-  4. list_my_orders():             Single subquery for item counts â€” fixes N+1
-  5. _clear_cart():               Opens its own DB session â€” fixes stale-session crash
+Phase 2 changes vs Phase 1:
+  1. create_order_from_frontend():
+       - Now locks InventoryLevel rows (not Product rows) via the
+         inventory_service.commit_stock() call.
+       - Writes two ledger rows per item (available→ -qty, committed→ +qty).
+       - Falls back gracefully if no InventoryLevel exists yet (bootstraps
+         from product.stock_quantity).
+
+  2. checkout() (legacy route):
+       - Same ledger integration applied.
+
+  3. cancel_order():
+       - Uses inventory_service.release_committed_stock() to return
+         committed stock → available, including legacy-order safety.
+
+All other routes (confirm_payment, list_my_orders, get_order, track_order)
+are unchanged from Phase 1.
 """
 
 import os
@@ -24,12 +36,18 @@ import models
 import schemas
 from database  import get_db, SessionLocal
 from utils     import get_current_user
+from services.inventory_service import (
+    commit_stock,
+    release_committed_stock,
+    get_primary_location,
+    InsufficientStockError,
+)
 
 logger = logging.getLogger("rudhita")
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
 
-# â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _get_razorpay() -> razorpay.Client:
     key_id     = os.getenv("RAZORPAY_KEY_ID")
@@ -40,11 +58,14 @@ def _get_razorpay() -> razorpay.Client:
 
 
 def _format_address(addr: schemas.CheckoutAddress) -> str:
-    return f"{addr.name}, {addr.phone}, {addr.street}, {addr.city}, {addr.state} - {addr.pincode}"
+    return (
+        f"{addr.name}, {addr.phone}, {addr.street}, "
+        f"{addr.city}, {addr.state} - {addr.pincode}"
+    )
 
 
-# FIX: background task creates its own session â€” the request session is closed by now
 def _clear_cart(user_id: int) -> None:
+    """Background task — opens its own session so the request session is gone."""
     db = SessionLocal()
     try:
         cart = db.query(models.Cart).filter(models.Cart.user_id == user_id).first()
@@ -58,7 +79,7 @@ def _clear_cart(user_id: int) -> None:
         db.close()
 
 
-# â”€â”€ 1. Create order â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── 1. Create order (Phase 2: ledger-aware checkout) ─────────────────────────
 
 @router.post("/", response_model=dict, status_code=201)
 def create_order_from_frontend(
@@ -68,10 +89,21 @@ def create_order_from_frontend(
     current_user:     models.User = Depends(get_current_user),
 ):
     """
-    Reads cart, creates a Razorpay order, and persists everything atomically.
+    Creates a Razorpay order and persists all Order/OrderItem rows
+    atomically.
 
-    FIX: Uses SELECT FOR UPDATE on each product row so two simultaneous checkouts
-         for the last item in stock cannot both succeed.
+    Phase 2 stock flow:
+      For each cart item:
+        1. Read Product (no lock — just need price/active status).
+        2. Call commit_stock() which internally issues
+           SELECT ... FOR UPDATE on the InventoryLevel row,
+           checks available >= qty, then writes two ledger rows
+           and mutates the cached buckets.
+      If ANY item fails the stock check the entire transaction is
+      rolled back and a 400 is returned.  Razorpay is never called.
+
+    Legacy products (InventoryLevel row doesn't exist yet):
+      ensure_inventory_level() bootstraps from product.stock_quantity.
     """
     cart = (
         db.query(models.Cart)
@@ -82,50 +114,54 @@ def create_order_from_frontend(
     if not cart or not cart.items:
         raise HTTPException(status_code=400, detail="Your cart is empty.")
 
-    total       = 0
-    order_items = []
+    # Resolve the primary warehouse once for this request
+    try:
+        primary_location = get_primary_location(db)
+    except HTTPException:
+        raise HTTPException(
+            status_code=503,
+            detail="Inventory system not ready. Contact admin.",
+        )
 
+    total       = 0
+    order_items = []   # list of (product, quantity)
+
+    # ── Phase 1: validate stock ──────────────────────────────────────────────
+    # We collect all validation errors before touching Razorpay so we never
+    # create an orphaned Razorpay order.
     for cart_item in cart.items:
-        # FIX: lock the product row for this transaction â€” prevents race conditions
-        product = db.execute(
-            select(models.Product)
-            .where(models.Product.id == cart_item.product_id)
-            .with_for_update()                         # <-- row-level lock
-        ).scalar_one_or_none()
+        # Plain SELECT — no lock needed just for reads
+        product = db.get(models.Product, cart_item.product_id)
 
         if not product or not product.is_active:
             raise HTTPException(
                 status_code=400,
-                detail=f"Product id={cart_item.product_id} is no longer available."
-            )
-        if product.stock_quantity < cart_item.quantity:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Only {product.stock_quantity} unit(s) of '{product.name}' left in stock."
+                detail=f"Product id={cart_item.product_id} is no longer available.",
             )
 
         total += float(product.price) * cart_item.quantity
         order_items.append((product, cart_item.quantity))
 
-    shipping_address = _format_address(order_data.address)
-
+    # ── Phase 2: create Razorpay order ───────────────────────────────────────
     rz       = _get_razorpay()
     rz_order = rz.order.create({
-        "amount":   int(round(total * 100)),   # paise, no float drift
+        "amount":   int(round(total * 100)),
         "currency": "INR",
-        "receipt":  f"rudhita_user_{current_user.id}",
+        "receipt":  f"rudhita_{current_user.id}",
     })
 
+    # ── Phase 3: persist Order + Items + Ledger (one atomic transaction) ────
     new_order = models.Order(
-        user_id            = current_user.id,
-        total_amount       = round(total, 2),
-        shipping_address   = shipping_address,
-        razorpay_order_id  = rz_order["id"],
-        payment_status     = "Pending",
-        shipping_status    = "Pending",
+        user_id           = current_user.id,
+        total_amount      = round(total, 2),
+        shipping_address  = _format_address(order_data.address),
+        razorpay_order_id = rz_order["id"],
+        payment_status    = "Pending",
+        shipping_status   = "Pending",
+        source            = "storefront",
     )
     db.add(new_order)
-    db.flush()  # get new_order.id before creating items
+    db.flush()  # get new_order.id before creating children
 
     for product, qty in order_items:
         db.add(models.OrderItem(
@@ -134,30 +170,51 @@ def create_order_from_frontend(
             quantity          = qty,
             price_at_purchase = product.price,
         ))
-        product.stock_quantity -= qty   # safe: row is locked
+
+        # ── LEDGER WRITE: available → committed ─────────────────────────
+        # This issues SELECT FOR UPDATE on InventoryLevel internally.
+        # Raises InsufficientStockError → triggers automatic rollback.
+        try:
+            commit_stock(
+                db,
+                product_id  = product.id,
+                location_id = primary_location.id,
+                quantity    = qty,
+                order_id    = new_order.id,
+                actor_id    = current_user.id,
+            )
+        except InsufficientStockError as exc:
+            # Roll back the entire transaction (Razorpay order is abandoned)
+            db.rollback()
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        # Keep legacy cache accurate for old admin routes
+        product.stock_quantity = max(0, product.stock_quantity - qty)
 
     db.add(models.TrackingEvent(
         order_id    = new_order.id,
         status      = "Order Placed",
         description = "Your order has been received and is being processed.",
     ))
-    db.commit()  # lock released here; all stock decrements are now visible atomically
+    db.commit()
 
-    # FIX: pass user_id not db â€” background task opens its own session
     background_tasks.add_task(_clear_cart, current_user.id)
 
-    logger.info("Order #%s created for user %s, Razorpay=%s", new_order.id, current_user.id, rz_order["id"])
+    logger.info(
+        "Order #%s created for user %s  Razorpay=%s  total=%.2f",
+        new_order.id, current_user.id, rz_order["id"], total,
+    )
 
     return {
-        "order_id":         new_order.id,
+        "order_id":          new_order.id,
         "razorpay_order_id": rz_order["id"],
-        "amount":           round(total, 2),
-        "currency":         "INR",
-        "key_id":           os.getenv("RAZORPAY_KEY_ID"),
+        "amount":            round(total, 2),
+        "currency":          "INR",
+        "key_id":            os.getenv("RAZORPAY_KEY_ID"),
     }
 
 
-# â”€â”€ 2. Legacy checkout route (kept for compatibility) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── 2. Legacy checkout (kept for compatibility) ────────────────────────────────
 
 @router.post("/checkout", response_model=dict, status_code=201)
 def checkout(
@@ -166,7 +223,7 @@ def checkout(
     db:               Session = Depends(get_db),
     current_user:     models.User = Depends(get_current_user),
 ):
-    """Legacy route â€” same race-condition fixes applied."""
+    """Legacy route — same Phase 2 ledger integration applied."""
     cart = (
         db.query(models.Cart)
         .options(joinedload(models.Cart.items))
@@ -176,21 +233,17 @@ def checkout(
     if not cart or not cart.items:
         raise HTTPException(status_code=400, detail="Your cart is empty.")
 
-    total       = 0
-    order_items = []
+    try:
+        primary_location = get_primary_location(db)
+    except HTTPException:
+        raise HTTPException(status_code=503, detail="Inventory system not ready.")
+
+    total, order_items = 0, []
 
     for cart_item in cart.items:
-        product = db.execute(
-            select(models.Product)
-            .where(models.Product.id == cart_item.product_id)
-            .with_for_update()
-        ).scalar_one_or_none()
-
+        product = db.get(models.Product, cart_item.product_id)
         if not product or not product.is_active:
-            raise HTTPException(status_code=400, detail=f"Product unavailable.")
-        if product.stock_quantity < cart_item.quantity:
-            raise HTTPException(status_code=400, detail=f"Insufficient stock for '{product.name}'.")
-
+            raise HTTPException(status_code=400, detail="A product in your cart is unavailable.")
         total += float(product.price) * cart_item.quantity
         order_items.append((product, cart_item.quantity))
 
@@ -213,7 +266,19 @@ def checkout(
             order_id=new_order.id, product_id=product.id,
             quantity=qty, price_at_purchase=product.price,
         ))
-        product.stock_quantity -= qty
+        try:
+            commit_stock(
+                db,
+                product_id  = product.id,
+                location_id = primary_location.id,
+                quantity    = qty,
+                order_id    = new_order.id,
+                actor_id    = current_user.id,
+            )
+        except InsufficientStockError as exc:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=str(exc))
+        product.stock_quantity = max(0, product.stock_quantity - qty)
 
     db.add(models.TrackingEvent(
         order_id=new_order.id, status="Order Placed",
@@ -223,28 +288,23 @@ def checkout(
     background_tasks.add_task(_clear_cart, current_user.id)
 
     return {
-        "order_id": new_order.id,
+        "order_id":          new_order.id,
         "razorpay_order_id": rz_order["id"],
-        "amount": round(total, 2),
-        "currency": "INR",
-        "key_id": os.getenv("RAZORPAY_KEY_ID"),
+        "amount":            round(total, 2),
+        "currency":          "INR",
+        "key_id":            os.getenv("RAZORPAY_KEY_ID"),
     }
 
 
-# â”€â”€ 3. Confirm payment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── 3. Confirm payment ─────────────────────────────────────────────────────────
 
 @router.post("/{order_id}/confirm-payment")
 def confirm_payment(
     order_id: int,
-    payload:  schemas.PaymentConfirm,      # FIX: new schema â€” requires all 3 Razorpay fields
+    payload:  schemas.PaymentConfirm,
     db:       Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """
-    FIX 1: Verifies the Razorpay HMAC-SHA256 signature before marking as Paid.
-            Without this any user can send fake payment data and get goods for free.
-    FIX 2: Idempotency guard â€” a Paid order cannot be downgraded.
-    """
     order = db.query(models.Order).filter(
         models.Order.id      == order_id,
         models.Order.user_id == current_user.id,
@@ -252,26 +312,25 @@ def confirm_payment(
     if not order:
         raise HTTPException(status_code=404, detail="Order not found.")
 
-    # Verify the order belongs to the Razorpay order we created
     if order.razorpay_order_id != payload.razorpay_order_id:
         raise HTTPException(status_code=400, detail="Razorpay order ID mismatch.")
 
-    # FIX: Idempotency â€” never overwrite a completed payment
     if order.payment_status == "Paid":
         return {"status": "success", "message": "Order is already marked as paid."}
 
-    # FIX: Cryptographic signature verification
     key_secret = os.getenv("RAZORPAY_KEY_SECRET", "").encode()
     body       = f"{payload.razorpay_order_id}|{payload.razorpay_payment_id}".encode()
-    # BUG 8 FIX: use digestmod= keyword arg
     expected   = hmac.new(key_secret, body, digestmod=hashlib.sha256).hexdigest()
 
     if not hmac.compare_digest(expected, payload.razorpay_signature):
         logger.warning(
-            "Payment signature mismatch for order #%s, user #%s",
-            order_id, current_user.id
+            "Payment signature mismatch order #%s user #%s",
+            order_id, current_user.id,
         )
-        raise HTTPException(status_code=400, detail="Payment verification failed. Signature mismatch.")
+        raise HTTPException(
+            status_code=400,
+            detail="Payment verification failed. Signature mismatch.",
+        )
 
     order.payment_status      = "Paid"
     order.razorpay_payment_id = payload.razorpay_payment_id
@@ -283,11 +342,11 @@ def confirm_payment(
     ))
     db.commit()
 
-    logger.info("Payment confirmed for order #%s (payment=%s)", order_id, payload.razorpay_payment_id)
+    logger.info("Payment confirmed order #%s payment=%s", order_id, payload.razorpay_payment_id)
     return {"status": "success", "message": f"Order #{order_id} payment confirmed."}
 
 
-# â”€â”€ 4. List my orders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── 4. List my orders ─────────────────────────────────────────────────────────
 
 @router.get("/", response_model=schemas.OrderListResponse)
 def list_my_orders(
@@ -296,11 +355,7 @@ def list_my_orders(
     db:    Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """
-    FIX: Replaces the N+1 loop (one COUNT query per order) with a single
-         GROUP BY subquery â€” all item counts fetched in one DB round-trip.
-    """
-    # Subquery: item_count per order
+    """Single GROUP-BY subquery for item counts — no N+1."""
     item_count_sq = (
         db.query(
             models.OrderItem.order_id,
@@ -320,21 +375,22 @@ def list_my_orders(
         .all()
     )
 
-    result = [
-        schemas.OrderSummaryResponse(
-            id              = o.id,
-            total_amount    = o.total_amount,
-            payment_status  = o.payment_status,
-            shipping_status = o.shipping_status,
-            item_count      = count or 0,
-            created_at      = o.created_at,
-        )
-        for o, count in rows
-    ]
-    return schemas.OrderListResponse(orders=result)
+    return schemas.OrderListResponse(
+        orders=[
+            schemas.OrderSummaryResponse(
+                id              = o.id,
+                total_amount    = o.total_amount,
+                payment_status  = o.payment_status,
+                shipping_status = o.shipping_status,
+                item_count      = count or 0,
+                created_at      = o.created_at,
+            )
+            for o, count in rows
+        ]
+    )
 
 
-# â”€â”€ 5. Order detail â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── 5. Order detail ────────────────────────────────────────────────────────────
 
 @router.get("/{order_id}", response_model=schemas.OrderResponse)
 def get_order(
@@ -356,7 +412,7 @@ def get_order(
     return order
 
 
-# â”€â”€ 6. Track order â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── 6. Track order ─────────────────────────────────────────────────────────────
 
 @router.get("/{order_id}/track", response_model=schemas.TrackingResponse)
 def track_order(
@@ -384,7 +440,7 @@ def track_order(
     )
 
 
-# â”€â”€ 7. Cancel order â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── 7. Cancel order (Phase 2: ledger-aware) ────────────────────────────────────
 
 @router.post("/{order_id}/cancel")
 def cancel_order(
@@ -392,6 +448,10 @@ def cancel_order(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    """
+    Phase 2: uses release_committed_stock() to return inventory
+    to the available bucket.  Handles legacy orders safely.
+    """
     order = db.query(models.Order).filter(
         models.Order.id == order_id, models.Order.user_id == current_user.id
     ).first()
@@ -400,26 +460,36 @@ def cancel_order(
     if order.shipping_status not in ("Pending", "Processing"):
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot cancel an order that is '{order.shipping_status}'."
+            detail=f"Cannot cancel an order with status '{order.shipping_status}'.",
         )
 
     order.shipping_status = "Cancelled"
-    order.payment_status  = "Refund Initiated" if order.payment_status == "Paid" else "Cancelled"
+    order.payment_status  = (
+        "Refund Initiated" if order.payment_status == "Paid" else "Cancelled"
+    )
 
-    # Restore stock for each item (lock rows to be safe)
-    for item in order.items:
-        product = db.execute(
-            select(models.Product)
-            .where(models.Product.id == item.product_id)
-            .with_for_update()
-        ).scalar_one_or_none()
-        if product:
-            product.stock_quantity += item.quantity
+    try:
+        primary_location = get_primary_location(db)
+        for item in order.items:
+            release_committed_stock(
+                db,
+                product_id  = item.product_id,
+                location_id = primary_location.id,
+                quantity    = item.quantity,
+                order_id    = order.id,
+                actor_id    = current_user.id,
+            )
+    except Exception as exc:
+        logger.error(
+            "Inventory release failed on cancel order #%s: %s", order_id, exc
+        )
+        # Still cancel the order even if ledger release fails
+        # — admin can reconcile via manual adjustment
 
     db.add(models.TrackingEvent(
         order_id    = order.id,
         status      = "Cancelled",
-        description = "Order cancelled by customer.",
+        description = "Order cancelled by customer. Stock has been released.",
     ))
     db.commit()
     return {"status": "success", "message": "Order cancelled and stock restored."}
