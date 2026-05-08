@@ -1,12 +1,13 @@
 """
-main.py  â€”  FastAPI Application Entry Point (PATCHED)
+main.py  —  FastAPI Application Entry Point (PATCHED)
 
 Changes from audit:
   - /docs and /redoc are disabled in production (ENV=production)
-  - /health/pool requires admin auth â€” no longer public
+  - /health/pool requires admin auth — no longer public
   - Structured JSON-style logging configured at startup
   - Request ID middleware added (X-Request-ID header on every response)
-  - Generic 500 handler added â€” no stack traces leak to clients
+  - Generic 500 handler added — no stack traces leak to clients
+  - CORS patched to explicitly allow rudhita.com and vercel frontend
 """
 
 import os
@@ -33,7 +34,7 @@ from admin    import router as admin_router, require_admin
 from user     import router as user_router
 from webhook  import router as webhook_router
 
-# â”€â”€ Logging â€” configure before anything else â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# —— Logging — configure before anything else ——————————————————————————
 logging.config.dictConfig({
     "version":    1,
     "disable_existing_loggers": False,
@@ -59,20 +60,20 @@ logging.config.dictConfig({
 }) 
 logger = logging.getLogger("rudhita")
 
-# â”€â”€ Detect environment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# —— Detect environment ————————————————————————————————————————————————
 IS_PRODUCTION = os.getenv("ENV", "development").lower() == "production"
-logger.info("Starting Rudhita API â€” mode=%s", "production" if IS_PRODUCTION else "development")
+logger.info("Starting Rudhita API — mode=%s", "production" if IS_PRODUCTION else "development")
 
-# â”€â”€ Auto-create tables (safe for now; migrate to Alembic before v2 schema change) â”€â”€
+# —— Auto-create tables (safe for now; migrate to Alembic before v2 schema change) ——
 models.Base.metadata.create_all(bind=engine)
 
-# â”€â”€ Rate limiter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# —— Rate limiter ——————————————————————————————————————————————————————
 limiter = Limiter(key_func=get_remote_address)
 
-# â”€â”€ App â€” docs disabled in production â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# —— App — docs disabled in production —————————————————————————————————
 app = FastAPI(
     title       = "Rudhita E-Commerce API",
-    description = "Backend for Rudhita â€” clothing, jewellery & lifestyle.",
+    description = "Backend for Rudhita — clothing, jewellery & lifestyle.",
     version     = "2.1.0",
     docs_url    = None if IS_PRODUCTION else "/docs",    # FIX: hidden in prod
     redoc_url   = None if IS_PRODUCTION else "/redoc",   # FIX: hidden in prod
@@ -82,7 +83,7 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# â”€â”€ FIX: Generic 500 handler â€” never leak stack traces to clients â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# —— FIX: Generic 500 handler — never leak stack traces to clients —————
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
@@ -91,27 +92,32 @@ async def global_exception_handler(request: Request, exc: Exception):
         content={"detail": "An internal server error occurred. Please try again later."},
     )
 
-# â”€â”€ FIX: Request ID middleware â€” every request gets a traceable ID â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# —— FIX: Request ID middleware — every request gets a traceable ID ————
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
     request_id               = str(uuid.uuid4())[:8]
     request.state.request_id = request_id
-    logger.info("â†’ %s %s [rid=%s]", request.method, request.url.path, request_id)
+    logger.info("→ %s %s [rid=%s]", request.method, request.url.path, request_id)
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
-    logger.info("â† %s %s %s [rid=%s]",
+    logger.info("← %s %s %s [rid=%s]",
                 request.method, request.url.path, response.status_code, request_id)
     return response
 
-# â”€â”€ CORS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# —— CORS (UPDATED FOR PRODUCTION DOMAINS) —————————————————————————————
 _raw_origins   = os.getenv("ALLOWED_ORIGINS", "")
 allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+
+# Hard fallback to ensure live domains are always permitted
 if not allowed_origins:
+    allowed_origins = [
+        "http://localhost:5173",       # Local Vite development
+        "https://rudhita.vercel.app",  # Vercel fallback URL
+        "https://rudhita.com",         # Official Live Domain
+        "https://www.rudhita.com"      # Official Live Domain (www)
+    ]
     if IS_PRODUCTION:
-        logger.error("ALLOWED_ORIGINS is not set â€” CORS will block all requests in production!")
-        allowed_origins = []   # block everything rather than allow everything
-    else:
-        allowed_origins = ["http://localhost:3000", "http://127.0.0.1:5500"]
+        logger.warning("ALLOWED_ORIGINS missing from .env! Using secure default list.")
 
 app.add_middleware(
     CORSMiddleware,
@@ -121,7 +127,7 @@ app.add_middleware(
     allow_headers     = ["*"],
 )
 
-# â”€â”€ Routers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# —— Routers ———————————————————————————————————————————————————————————
 app.include_router(auth_router)
 app.include_router(products_router)
 app.include_router(cart_router)
@@ -131,17 +137,17 @@ app.include_router(user_router)
 app.include_router(webhook_router)   # Razorpay payment event safety net
 
 
-# â”€â”€ Health check (public) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# —— Health check (public) —————————————————————————————————————————————
 @app.get("/", tags=["Health"])
 def health_check(db: Session = Depends(get_db)):
     db.execute(text("SELECT 1"))
     return {"status": "online", "service": "Rudhita API v2.1", "db": "connected"}
 
 
-# â”€â”€ FIX: Pool stats now require admin auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# —— FIX: Pool stats now require admin auth ————————————————————————————
 @app.get("/health/pool", tags=["Health"], include_in_schema=not IS_PRODUCTION)
 def pool_stats(_: models.User = Depends(require_admin)):
-    """Internal monitoring endpoint â€” admin only."""
+    """Internal monitoring endpoint — admin only."""
     pool = engine.pool
     return {
         "pool_size":   pool.size(),
