@@ -113,10 +113,11 @@ allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 # Hard fallback to ensure live domains are always permitted
 if not allowed_origins:
     allowed_origins = [
-        "http://localhost:5173",       # Local Vite development
-        "https://rudhita.vercel.app",  # Vercel fallback URL
-        "https://rudhita.com",         # Official Live Domain
-        "https://www.rudhita.com"      # Official Live Domain (www)
+        "http://localhost:5173",              # Local Vite development
+        "https://rudhita.vercel.app",         # Vercel fallback URL
+        "https://rudhita-ten.vercel.app",     # Vercel production deployment
+        "https://rudhita.com",                # Official Live Domain
+        "https://www.rudhita.com",            # Official Live Domain (www)
     ]
     if IS_PRODUCTION:
         logger.warning("ALLOWED_ORIGINS missing from .env! Using secure default list.")
