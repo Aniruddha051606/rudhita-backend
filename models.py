@@ -165,17 +165,22 @@ class User(Base):
     id             = Column(Integer, primary_key=True, index=True)
     name           = Column(String(100), nullable=False)
     email          = Column(String(150), unique=True, nullable=False, index=True)
-    password_hash  = Column(String(255), nullable=False)
+    password_hash  = Column(String(255), nullable=True)             # nullable: Google-only users have no password
+    auth_provider  = Column(String(20),  default='local', nullable=False)
+    google_id      = Column(String(100), unique=True, nullable=True, index=True)
+    avatar_url     = Column(String(500), nullable=True)
     phone          = Column(String(20))
     is_verified    = Column(Boolean, default=False, nullable=False)
     is_admin       = Column(Boolean, default=False)
     created_at     = Column(DateTime(timezone=True), server_default=func.now())
 
-    orders          = relationship("Order",         back_populates="owner",   lazy="select")
-    cart            = relationship("Cart",          back_populates="user",    uselist=False)
-    addresses       = relationship("Address",       back_populates="user",    cascade="all, delete-orphan")
-    refresh_tokens  = relationship("RefreshToken",  back_populates="user",    cascade="all, delete-orphan")
-    return_requests = relationship("ReturnRequest", back_populates="customer", lazy="select")  # NEW
+    orders          = relationship("Order",         back_populates="owner",    lazy="select")
+    cart            = relationship("Cart",          back_populates="user",     uselist=False)
+    addresses       = relationship("Address",       back_populates="user",     cascade="all, delete-orphan")
+    refresh_tokens  = relationship("RefreshToken",  back_populates="user",     cascade="all, delete-orphan")
+    return_requests = relationship("ReturnRequest", back_populates="customer", lazy="select")
+    reviews         = relationship("ProductReview", back_populates="user",     cascade="all, delete-orphan")
+    wishlist_items  = relationship("WishlistItem",  back_populates="user",     cascade="all, delete-orphan")
 
 
 class Address(Base):
@@ -213,8 +218,10 @@ class Product(Base):
     is_active      = Column(Boolean, default=True)
     created_at     = Column(DateTime(timezone=True), server_default=func.now())
 
-    inventory_levels       = relationship("InventoryLevel",       back_populates="product",  lazy="select")  # NEW
-    inventory_transactions = relationship("InventoryTransaction", back_populates="product",  lazy="select")  # NEW
+    inventory_levels       = relationship("InventoryLevel",       back_populates="product",  lazy="select")
+    inventory_transactions = relationship("InventoryTransaction", back_populates="product",  lazy="select")
+    reviews                = relationship("ProductReview",        back_populates="product",  cascade="all, delete-orphan")
+    wishlist_items         = relationship("WishlistItem",         back_populates="product",  cascade="all, delete-orphan")
 
     __table_args__ = (Index("ix_products_category_price", "category", "price"),)
 
@@ -634,3 +641,48 @@ class PurchaseOrderItem(Base):
 
     purchase_order = relationship("PurchaseOrder", back_populates="items")
     product        = relationship("Product")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 3: PRODUCT REVIEW
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ProductReview(Base):
+    """One user review per product. is_verified = True when the reviewer has a paid order for this product."""
+    __tablename__ = "product_reviews"
+    id          = Column(Integer, primary_key=True, index=True)
+    user_id     = Column(Integer, ForeignKey("users.id",    ondelete="CASCADE"), nullable=False, index=True)
+    product_id  = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    rating      = Column(SmallInteger, nullable=False)        # 1–5, enforced in Pydantic schema
+    title       = Column(String(200))
+    body        = Column(Text)
+    is_verified = Column(Boolean, default=False, nullable=False)
+    created_at  = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at  = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    user    = relationship("User",    back_populates="reviews")
+    product = relationship("Product", back_populates="reviews")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "product_id", name="uq_review_user_product"),
+        Index("ix_review_product_rating", "product_id", "rating"),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 3: WISHLIST ITEM
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WishlistItem(Base):
+    __tablename__ = "wishlist_items"
+    id         = Column(Integer, primary_key=True, index=True)
+    user_id    = Column(Integer, ForeignKey("users.id",    ondelete="CASCADE"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    user    = relationship("User",    back_populates="wishlist_items")
+    product = relationship("Product", back_populates="wishlist_items")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "product_id", name="uq_wishlist_user_product"),
+    )

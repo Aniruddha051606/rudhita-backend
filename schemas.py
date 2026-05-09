@@ -443,3 +443,60 @@ class InventoryAdjustRequest(BaseModel):
     )
     notes: Optional[str] = Field(default=None, max_length=500)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 3 — GOOGLE AUTH
+# ─────────────────────────────────────────────────────────────────────────────
+
+class GoogleAuthRequest(BaseModel):
+    id_token: str
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 3 — REVIEWS
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ReviewCreate(BaseModel):
+    rating: int         = Field(ge=1, le=5)
+    title:  Optional[str] = Field(default=None, max_length=200)
+    body:   Optional[str] = None
+
+
+class ReviewUpdate(BaseModel):
+    rating: Optional[int] = Field(default=None, ge=1, le=5)
+    title:  Optional[str] = Field(default=None, max_length=200)
+    body:   Optional[str] = None
+
+
+class ReviewResponse(BaseModel):
+    id:           int
+    product_id:   int
+    user_id:      int
+    rating:       int
+    title:        Optional[str] = None
+    body:         Optional[str] = None
+    is_verified:  bool
+    created_at:   datetime
+    author_name:  Optional[str] = None
+    author_avatar: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProductRatingSummary(BaseModel):
+    product_id:     int
+    average_rating: float
+    review_count:   int
+    distribution:   dict   # {1: N, 2: N, 3: N, 4: N, 5: N}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 3 — WISHLIST
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WishlistItemResponse(BaseModel):
+    id:         int
+    product_id: int
+    product:    ProductResponse
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+

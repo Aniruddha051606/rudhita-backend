@@ -33,6 +33,8 @@ from orders   import router as orders_router
 from admin    import router as admin_router, require_admin
 from user     import router as user_router
 from webhook  import router as webhook_router
+from reviews  import router as reviews_router
+from wishlist import router as wishlist_router
 
 # —— Logging — configure before anything else ——————————————————————————
 logging.config.dictConfig({
@@ -135,6 +137,8 @@ app.include_router(orders_router)
 app.include_router(admin_router)
 app.include_router(user_router)
 app.include_router(webhook_router)   # Razorpay payment event safety net
+app.include_router(reviews_router)
+app.include_router(wishlist_router)
 
 
 # —— Health check (public) —————————————————————————————————————————————

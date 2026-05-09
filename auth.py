@@ -11,6 +11,7 @@ Changes from audit:
   - NEW /auth/refresh: issues a new access_token from a valid refresh_token
 """
 
+import os
 import secrets
 from datetime import datetime, timezone
 from typing import Optional
@@ -20,11 +21,15 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 from fastapi.security import OAuth2PasswordRequestForm
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_requests
 
 import models
 import schemas
 import utils
 from database import get_db
+
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 
 router  = APIRouter(prefix="/auth", tags=["Authentication"])
 limiter = Limiter(key_func=get_remote_address)
@@ -192,7 +197,8 @@ def login(
         detail="Invalid credentials.",
     )
     user = db.query(models.User).filter(models.User.email == form_data.username).first()
-    if not user or not utils.verify_password(form_data.password, user.password_hash):
+    # Google-only users have no password_hash — block them from the password endpoint
+    if not user or not user.password_hash or not utils.verify_password(form_data.password, user.password_hash):
         raise invalid
     if not user.is_verified:
         raise invalid
@@ -310,3 +316,73 @@ def logout(
 
     db.commit()
     return {"status": "success", "message": "Logged out successfully."}
+
+
+# ── Google OAuth ──────────────────────────────────────────────────────────────
+
+@router.post("/google", response_model=schemas.Token)
+@limiter.limit("10/minute")
+def google_login(
+    request: Request,
+    payload: schemas.GoogleAuthRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Verify a Google ID token obtained on the client via Google Sign-In.
+    If the email is already registered, merges the google_id and logs in.
+    If not, auto-creates a verified account with no password.
+    Returns the same access/refresh token pair as the standard login endpoint.
+    """
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="Google OAuth is not configured on this server.")
+
+    try:
+        idinfo = google_id_token.verify_oauth2_token(
+            payload.id_token,
+            google_requests.Request(),
+            GOOGLE_CLIENT_ID,
+        )
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid Google token.")
+
+    email      = idinfo.get("email")
+    google_sub = idinfo.get("sub")
+    name       = idinfo.get("name") or (email.split("@")[0] if email else "User")
+    avatar_url = idinfo.get("picture")
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Google token is missing an email address.")
+
+    user = db.query(models.User).filter(models.User.email == email).first()
+    if user:
+        if not user.google_id:
+            user.google_id     = google_sub
+            user.auth_provider = "google"
+        if avatar_url and not user.avatar_url:
+            user.avatar_url = avatar_url
+        user.is_verified = True
+        db.commit()
+    else:
+        user = models.User(
+            name          = name,
+            email         = email,
+            password_hash = None,
+            auth_provider = "google",
+            google_id     = google_sub,
+            avatar_url    = avatar_url,
+            is_verified   = True,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    access_token              = utils.create_access_token({"sub": user.email, "id": user.id})
+    refresh_token_str, expiry = utils.create_refresh_token()
+    db.add(models.RefreshToken(user_id=user.id, token=refresh_token_str, expires_at=expiry))
+    db.commit()
+
+    return {
+        "access_token":  access_token,
+        "refresh_token": refresh_token_str,
+        "token_type":    "bearer",
+    }
