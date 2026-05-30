@@ -1,5 +1,5 @@
 """
-admin.py  –  Admin / Seller Dashboard  |  Phase 2 Update
+admin.py  â€“  Admin / Seller Dashboard  |  Phase 2 Update
 ==========================================================
 
 Phase 2 new endpoints
@@ -52,7 +52,7 @@ logger = logging.getLogger("rudhita")
 router = APIRouter(prefix="/admin", tags=["Admin / Seller Dashboard"])
 
 
-# ── Auth dependency ────────────────────────────────────────────────────────────
+# â”€â”€ Auth dependency â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def require_admin(current_user: models.User = Depends(get_current_user)):
     if not current_user.is_admin:
@@ -60,7 +60,7 @@ def require_admin(current_user: models.User = Depends(get_current_user)):
     return current_user
 
 
-# ── Audit helper ───────────────────────────────────────────────────────────────
+# â”€â”€ Audit helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _audit(
     db:          Session,
@@ -76,7 +76,7 @@ def _audit(
             action      = action,
             target_type = target_type,
             target_id   = target_id,
-            detail      = json.dumps(detail) if detail else None,
+            detail      = json.dumps(detail, default=str) if detail else None,  # default=str: Decimal-safe
         ))
     except Exception as exc:
         logger.error("Failed to write audit log: %s", exc)
@@ -90,9 +90,9 @@ def _get_razorpay() -> razorpay.Client:
     return razorpay.Client(auth=(key_id, key_secret))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ── PHASE 2: FULFILLMENT CORE LOGIC (shared by single + bulk) ────────────────
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â”€â”€ PHASE 2: FULFILLMENT CORE LOGIC (shared by single + bulk) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _fulfill_order_in_session(
     db:            Session,
@@ -104,7 +104,7 @@ def _fulfill_order_in_session(
     actor_id:      Optional[int] = None,
 ) -> models.Fulfillment:
     """
-    Core fulfillment logic — usable from both the single-order endpoint
+    Core fulfillment logic â€” usable from both the single-order endpoint
     (where the caller manages the session) and the bulk background worker
     (which creates its own session).
 
@@ -114,7 +114,7 @@ def _fulfill_order_in_session(
       3. Create Fulfillment + FulfillmentItem rows.
       4. Write order_shipped InventoryTransaction for each item
          (legacy_fallback=True handles pre-Phase-1 orders).
-      5. Update Order.shipping_status → "Shipped".
+      5. Update Order.shipping_status â†’ "Shipped".
       6. Append a TrackingEvent.
       7. Flush (caller commits).
 
@@ -136,7 +136,7 @@ def _fulfill_order_in_session(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Order #{order_id} cannot be fulfilled — "
+                f"Order #{order_id} cannot be fulfilled â€” "
                 f"payment_status='{order.payment_status}' (must be 'Paid')."
             ),
         )
@@ -225,9 +225,9 @@ def _fulfill_order_in_session(
     return fulfillment
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ── BACKGROUND WORKER for bulk-fulfill ───────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â”€â”€ BACKGROUND WORKER for bulk-fulfill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _bulk_fulfill_worker(
     order_ids:   List[int],
@@ -235,7 +235,7 @@ def _bulk_fulfill_worker(
     actor_id:    int,
 ) -> None:
     """
-    FastAPI BackgroundTask — opens its own DB session so the
+    FastAPI BackgroundTask â€” opens its own DB session so the
     request session (already closed) is never touched.
 
     Processes each order independently so a single failure doesn't
@@ -258,11 +258,11 @@ def _bulk_fulfill_worker(
         except HTTPException as exc:
             db.rollback()
             failed.append({"order_id": oid, "reason": exc.detail})
-            logger.warning("Bulk-fulfill: order #%s SKIPPED — %s", oid, exc.detail)
+            logger.warning("Bulk-fulfill: order #%s SKIPPED â€” %s", oid, exc.detail)
         except Exception as exc:
             db.rollback()
             failed.append({"order_id": oid, "reason": str(exc)})
-            logger.error("Bulk-fulfill: order #%s ERROR — %s", oid, exc)
+            logger.error("Bulk-fulfill: order #%s ERROR â€” %s", oid, exc)
         finally:
             db.close()
 
@@ -292,9 +292,9 @@ def _bulk_fulfill_worker(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ── 1. Dashboard ──────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â”€â”€ 1. Dashboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/dashboard")
 def get_dashboard(
@@ -332,7 +332,7 @@ def get_dashboard(
     }
 
 
-# ── 2. Stats ───────────────────────────────────────────────────────────────────
+# â”€â”€ 2. Stats â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/stats", response_model=schemas.DashboardStats)
 def get_stats(db: Session = Depends(get_db), _: models.User = Depends(require_admin)):
@@ -348,7 +348,7 @@ def get_stats(db: Session = Depends(get_db), _: models.User = Depends(require_ad
     )
 
 
-# ── 3. Products ────────────────────────────────────────────────────────────────
+# â”€â”€ 3. Products â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/products")
 def admin_list_products(
@@ -440,7 +440,7 @@ def admin_delete_product(
     return {"status": "success", "message": f"Product '{product.name}' deactivated."}
 
 
-# ── 4. Orders ──────────────────────────────────────────────────────────────────
+# â”€â”€ 4. Orders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/orders")
 def admin_list_orders(
@@ -516,10 +516,10 @@ def admin_update_order(
     _audit(db, current_user, "update_order_status", "Order", order_id,
            {"from": prev_status, "to": normalised})
     db.commit()
-    return {"status": "success", "message": f"Order #{order_id} → '{normalised}'."}
+    return {"status": "success", "message": f"Order #{order_id} â†’ '{normalised}'."}
 
 
-# ── 4a. Waybill ────────────────────────────────────────────────────────────────
+# â”€â”€ 4a. Waybill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.patch("/orders/{order_id}/waybill")
 def set_waybill(
@@ -552,7 +552,7 @@ def set_waybill(
     return {"status": "success", "waybill": waybill}
 
 
-# ── 4b. Refund ─────────────────────────────────────────────────────────────────
+# â”€â”€ 4b. Refund â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/orders/{order_id}/refund")
 def admin_initiate_refund(
@@ -596,7 +596,7 @@ def admin_initiate_refund(
         order_id    = order.id,
         status      = "Refunded",
         description = (
-            f"Full refund of ₹{float(order.total_amount):,.2f} initiated. "
+            f"Full refund of â‚¹{float(order.total_amount):,.2f} initiated. "
             f"Razorpay Refund ID: {refund_id}."
         ),
     ))
@@ -611,13 +611,13 @@ def admin_initiate_refund(
         "status":    "success",
         "refund_id": refund_id,
         "amount":    float(order.total_amount),
-        "message":   f"Refund of ₹{float(order.total_amount):,.2f} initiated.",
+        "message":   f"Refund of â‚¹{float(order.total_amount):,.2f} initiated.",
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ── PHASE 2: SINGLE FULFILL ───────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â”€â”€ PHASE 2: SINGLE FULFILL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/orders/{order_id}/fulfill", response_model=schemas.FulfillmentResponse)
 def admin_fulfill_order(
@@ -680,9 +680,9 @@ def admin_fulfill_order(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ── PHASE 2: BULK FULFILL ─────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â”€â”€ PHASE 2: BULK FULFILL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/orders/bulk-fulfill", response_model=schemas.BulkFulfillResponse)
 def admin_bulk_fulfill(
@@ -699,11 +699,11 @@ def admin_bulk_fulfill(
 
     The background worker (_bulk_fulfill_worker) opens its own
     SessionLocal per order so each fulfillment is an independent
-    transaction — one failure does not abort the rest.
+    transaction â€” one failure does not abort the rest.
 
     Progress is visible in:
-      • Server logs (INFO level)
-      • GET /admin/audit-log (action = 'bulk_fulfill')
+      â€¢ Server logs (INFO level)
+      â€¢ GET /admin/audit-log (action = 'bulk_fulfill')
     """
     try:
         primary_location = get_primary_location(db)
@@ -722,7 +722,7 @@ def admin_bulk_fulfill(
     })
     db.commit()
 
-    # Enqueue — returns before the worker starts
+    # Enqueue â€” returns before the worker starts
     background_tasks.add_task(
         _bulk_fulfill_worker,
         order_ids   = order_ids,
@@ -746,9 +746,9 @@ def admin_bulk_fulfill(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ── PHASE 2: INVENTORY DASHBOARD ─────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â”€â”€ PHASE 2: INVENTORY DASHBOARD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/inventory")
 def admin_list_inventory(
@@ -765,7 +765,7 @@ def admin_list_inventory(
     return {"inventory": rows, "count": len(rows)}
 
 
-# ── 5. Users ───────────────────────────────────────────────────────────────────
+# â”€â”€ 5. Users â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/users")
 def admin_list_users(
@@ -810,7 +810,7 @@ def make_admin(
     return {"status": "success", "message": f"{user.name} is now an admin."}
 
 
-# ── 6. Low-stock alerts ────────────────────────────────────────────────────────
+# â”€â”€ 6. Low-stock alerts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/alerts/low-stock", response_model=List[schemas.ProductStockAlert])
 def low_stock_alerts(
@@ -826,7 +826,7 @@ def low_stock_alerts(
     )
 
 
-# ── 7. Audit log ───────────────────────────────────────────────────────────────
+# â”€â”€ 7. Audit log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/audit-log")
 def get_audit_log(
