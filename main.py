@@ -1,12 +1,12 @@
 """
-main.py  â€”  FastAPI Application Entry Point (PATCHED)
+main.py  Ã¢â‚¬â€  FastAPI Application Entry Point (PATCHED)
 
 Changes from audit:
   - /docs and /redoc are disabled in production (ENV=production)
-  - /health/pool requires admin auth â€” no longer public
+  - /health/pool requires admin auth Ã¢â‚¬â€ no longer public
   - Structured JSON-style logging configured at startup
   - Request ID middleware added (X-Request-ID header on every response)
-  - Generic 500 handler added â€” no stack traces leak to clients
+  - Generic 500 handler added Ã¢â‚¬â€ no stack traces leak to clients
   - CORS patched to explicitly allow rudhita.com and vercel frontend
 """
 
@@ -35,8 +35,9 @@ from user     import router as user_router
 from webhook  import router as webhook_router
 from reviews  import router as reviews_router
 from wishlist import router as wishlist_router
+from upload   import router as upload_router
 
-# â€”â€” Logging â€” configure before anything else â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”
+# Ã¢â‚¬â€Ã¢â‚¬â€ Logging Ã¢â‚¬â€ configure before anything else Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€
 logging.config.dictConfig({
     "version":    1,
     "disable_existing_loggers": False,
@@ -62,20 +63,20 @@ logging.config.dictConfig({
 }) 
 logger = logging.getLogger("rudhita")
 
-# â€”â€” Detect environment â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”
+# Ã¢â‚¬â€Ã¢â‚¬â€ Detect environment Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€
 IS_PRODUCTION = os.getenv("ENV", "development").lower() == "production"
-logger.info("Starting Rudhita API â€” mode=%s", "production" if IS_PRODUCTION else "development")
+logger.info("Starting Rudhita API Ã¢â‚¬â€ mode=%s", "production" if IS_PRODUCTION else "development")
 
-# â€”â€” Auto-create tables (safe for now; migrate to Alembic before v2 schema change) â€”â€”
+# Ã¢â‚¬â€Ã¢â‚¬â€ Auto-create tables (safe for now; migrate to Alembic before v2 schema change) Ã¢â‚¬â€Ã¢â‚¬â€
 models.Base.metadata.create_all(bind=engine)
 
-# â€”â€” Rate limiter â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”
+# Ã¢â‚¬â€Ã¢â‚¬â€ Rate limiter Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€
 limiter = Limiter(key_func=get_remote_address)
 
-# â€”â€” App â€” docs disabled in production â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”
+# Ã¢â‚¬â€Ã¢â‚¬â€ App Ã¢â‚¬â€ docs disabled in production Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€
 app = FastAPI(
     title       = "Rudhita E-Commerce API",
-    description = "Backend for Rudhita â€” clothing, jewellery & lifestyle.",
+    description = "Backend for Rudhita Ã¢â‚¬â€ clothing, jewellery & lifestyle.",
     version     = "2.1.0",
     docs_url    = None if IS_PRODUCTION else "/docs",    # FIX: hidden in prod
     redoc_url   = None if IS_PRODUCTION else "/redoc",   # FIX: hidden in prod
@@ -85,7 +86,7 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# â€”â€” FIX: Generic 500 handler â€” never leak stack traces to clients â€”â€”â€”â€”â€”
+# Ã¢â‚¬â€Ã¢â‚¬â€ FIX: Generic 500 handler Ã¢â‚¬â€ never leak stack traces to clients Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
@@ -94,19 +95,19 @@ async def global_exception_handler(request: Request, exc: Exception):
         content={"detail": "An internal server error occurred. Please try again later."},
     )
 
-# â€”â€” FIX: Request ID middleware â€” every request gets a traceable ID â€”â€”â€”â€”
+# Ã¢â‚¬â€Ã¢â‚¬â€ FIX: Request ID middleware Ã¢â‚¬â€ every request gets a traceable ID Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
     request_id               = str(uuid.uuid4())[:8]
     request.state.request_id = request_id
-    logger.info("â†’ %s %s [rid=%s]", request.method, request.url.path, request_id)
+    logger.info("Ã¢â€ â€™ %s %s [rid=%s]", request.method, request.url.path, request_id)
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
-    logger.info("â† %s %s %s [rid=%s]",
+    logger.info("Ã¢â€ Â %s %s %s [rid=%s]",
                 request.method, request.url.path, response.status_code, request_id)
     return response
 
-# â€”â€” CORS (UPDATED FOR PRODUCTION DOMAINS) â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”
+# Ã¢â‚¬â€Ã¢â‚¬â€ CORS (UPDATED FOR PRODUCTION DOMAINS) Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€
 _raw_origins   = os.getenv("ALLOWED_ORIGINS", "")
 allowed_origins = [o.strip().rstrip("/") for o in _raw_origins.split(",") if o.strip()]
 
@@ -130,7 +131,7 @@ app.add_middleware(
     allow_headers     = ["*"],
 )
 
-# â€”â€” Routers â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”
+# Ã¢â‚¬â€Ã¢â‚¬â€ Routers Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€
 app.include_router(auth_router)
 app.include_router(products_router)
 app.include_router(cart_router)
@@ -140,19 +141,20 @@ app.include_router(user_router)
 app.include_router(webhook_router)   # Razorpay payment event safety net
 app.include_router(reviews_router)
 app.include_router(wishlist_router)
+app.include_router(upload_router)
 
 
-# â€”â€” Health check (public) â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”
+# Ã¢â‚¬â€Ã¢â‚¬â€ Health check (public) Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€
 @app.get("/", tags=["Health"])
 def health_check(db: Session = Depends(get_db)):
     db.execute(text("SELECT 1"))
     return {"status": "online", "service": "Rudhita API v2.1", "db": "connected"}
 
 
-# â€”â€” FIX: Pool stats now require admin auth â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”
+# Ã¢â‚¬â€Ã¢â‚¬â€ FIX: Pool stats now require admin auth Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€Ã¢â‚¬â€
 @app.get("/health/pool", tags=["Health"], include_in_schema=not IS_PRODUCTION)
 def pool_stats(_: models.User = Depends(require_admin)):
-    """Internal monitoring endpoint â€” admin only."""
+    """Internal monitoring endpoint Ã¢â‚¬â€ admin only."""
     pool = engine.pool
     return {
         "pool_size":   pool.size(),
