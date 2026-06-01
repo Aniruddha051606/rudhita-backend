@@ -103,12 +103,6 @@ async def add_request_id(request: Request, call_next):
     logger.info("Ã¢â€ â€™ %s %s [rid=%s]", request.method, request.url.path, request_id)
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"]        = "DENY"
-    response.headers["Referrer-Policy"]        = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"]     = "geolocation=(), microphone=(), camera=()"
-    if IS_PRODUCTION:
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     logger.info("Ã¢â€ Â %s %s %s [rid=%s]",
                 request.method, request.url.path, response.status_code, request_id)
     return response
